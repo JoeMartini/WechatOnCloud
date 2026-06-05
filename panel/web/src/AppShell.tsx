@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from './auth';
+import { useAuthConfig } from './hooks/useAuthConfig';
 import { useUI, PasswordInput } from './ui';
 import { api, appProfile, type InstanceWithStatus } from './api';
 import { InstanceIcon } from './AppIcon';
@@ -88,6 +89,8 @@ export default function AppShell() {
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem('woc_sb_collapsed') === '1');
   const [drawer, setDrawer] = useState(false);
   const [showPw, setShowPw] = useState(false);
+  const { mode } = useAuthConfig();
+  const allowLocalMgmt = mode !== 'oidc_full';
   const [isDesktop, setIsDesktop] = useState(() => window.matchMedia('(min-width: 768px)').matches);
   const loc = useLocation();
 
@@ -132,11 +135,11 @@ export default function AppShell() {
   return (
     <InstancesCtx.Provider value={state}>
       <div className={'shell' + (railed ? ' collapsed' : '') + (drawer ? ' drawer-open' : '')}>
-        <Sidebar collapsed={railed} onToggleCollapsed={toggleCollapsed} />
+        <Sidebar collapsed={railed} onToggleCollapsed={toggleCollapsed} allowLocalMgmt={allowLocalMgmt} />
         <div className="shell-backdrop" onClick={() => setDrawer(false)} />
         <main className="workspace">
           <Routes>
-            <Route path="/" element={<HomeView onOpenMenu={openMenu} onChangePassword={openChangePassword} />} />
+            <Route path="/" element={<HomeView onOpenMenu={openMenu} onChangePassword={openChangePassword} allowLocalMgmt={allowLocalMgmt} />} />
             <Route path="/admin" element={<Admin onOpenMenu={openMenu} onChangePassword={openChangePassword} />} />
             <Route path="/i/:id" element={<InstanceView onOpenMenu={openMenu} />} />
             <Route path="*" element={<Navigate to="/" replace />} />
@@ -148,7 +151,7 @@ export default function AppShell() {
   );
 }
 
-function Sidebar({ collapsed, onToggleCollapsed }: { collapsed: boolean; onToggleCollapsed: () => void }) {
+function Sidebar({ collapsed, onToggleCollapsed, allowLocalMgmt }: { collapsed: boolean; onToggleCollapsed: () => void; allowLocalMgmt: boolean }) {
   const { user, logout } = useAuth();
   const { confirm } = useUI();
   const { instances } = useInstances();
@@ -240,7 +243,7 @@ function Sidebar({ collapsed, onToggleCollapsed }: { collapsed: boolean; onToggl
   );
 }
 
-function HomeView({ onOpenMenu, onChangePassword }: { onOpenMenu: () => void; onChangePassword: () => void }) {
+function HomeView({ onOpenMenu, onChangePassword, allowLocalMgmt }: { onOpenMenu: () => void; onChangePassword: () => void; allowLocalMgmt: boolean }) {
   const { user } = useAuth();
   const { instances, loaded } = useInstances();
   const nav = useNavigate();
@@ -261,7 +264,7 @@ function HomeView({ onOpenMenu, onChangePassword }: { onOpenMenu: () => void; on
           {isAdmin && <span className="tag">管理员</span>}
         </div>
 
-        {user?.mustChangePassword && (
+        {allowLocalMgmt && user?.mustChangePassword && (
           <button className="warn-banner" onClick={onChangePassword}>
             <span className="warn-icon">!</span>
             <span className="warn-text">
