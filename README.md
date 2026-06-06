@@ -12,6 +12,8 @@
   <a href="https://github.com/Gloridust/WechatOnCloud/issues"><img src="https://img.shields.io/github/issues/Gloridust/WechatOnCloud?style=flat-square" alt="issues" /></a>
   <img src="https://img.shields.io/badge/arch-amd64%20%7C%20arm64-2496ED?style=flat-square&logo=docker&logoColor=white" alt="arch" />
   <img src="https://img.shields.io/badge/PWA-ready-5A0FC8?style=flat-square" alt="pwa" />
+  <a href="https://x.com/gloridust1024"><img src="https://img.shields.io/badge/Twitter-@gloridust1024-1DA1F2?style=flat-square&logo=x&logoColor=white" alt="twitter" /></a>
+  <a href="https://t.me/WechatOnCloud"><img src="https://img.shields.io/badge/Telegram-WechatOnCloud-26A5E4?style=flat-square&logo=telegram&logoColor=white" alt="telegram" /></a>
 </p>
 
 <p>
@@ -34,6 +36,8 @@
 在飞牛 NAS（x86_64 / arm64）或任意 Docker 主机上运行服务端微信：可管理**多个**微信实例，每个实例是一个独立的微信会话；多个 web 用户通过浏览器访问被授权的实例，实现跨设备消息同步、多端共享。**不修改微信客户端。**
 
 **一句话原理**：每个微信实例 = 一个容器，里面跑 Xvfb 虚拟显示 + 官方原版微信，KasmVNC 把画面串到浏览器；同一实例被多个浏览器连 = 共享同一个微信会话。前面一层自研**面板**是唯一对外入口，经 docker.sock 按需创建/销毁实例并反向代理。
+
+交流群: [@WechatOnCloud](https://t.me/WechatOnCloud)
 
 ---
 
@@ -58,6 +62,7 @@
 |------|------|
 | [运行原理与 Docker 指南](doc/运行原理.md) | 工作原理 + 架构图；面向 Docker 新手的逐步拆解、常用命令、架构自动适配 |
 | [部署与运维](doc/部署与运维.md) | 数据持久化、常见问题排查、忘记超管密码的离线找回、目录结构 |
+| [设备伪装与风控应对](doc/设备伪装.md) | 唯一 machine-id / 真实 hostname / os-release 伪装；账号被微信强制退出循环时怎么办 |
 | [发布到 GHCR](doc/发布到GHCR.md) | 用 GitHub Actions 或本机 buildx 把镜像发布到 GHCR |
 | [技术方案](doc/技术方案.md) | 完整设计文档与选型权衡 |
 
@@ -175,6 +180,11 @@ docker compose up -d            # 直接从 GHCR 拉取
 - [x] 多端并发控制（操作控制权心跳软锁 + 只读遮罩 + 申请接管）
 - [ ] 掉登录时 web 端二维码重扫入口
 - [~] 打包成飞牛原生 fpk 分发（工程已就绪见 [fnos/](fnos/)，待真实设备验证 docker.sock 权限）
+
+## 交流与关注
+
+- 🐦 Twitter / X：[@gloridust1024](https://x.com/gloridust1024) — 更新与动态
+- ✈️ Telegram：[@WechatOnCloud](https://t.me/WechatOnCloud) — 交流群 / 问题反馈
 
 ## 致谢
 

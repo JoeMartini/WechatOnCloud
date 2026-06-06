@@ -543,6 +543,7 @@ function ResetPassword({ user, onClose, onDone }: { user: PanelUser; onClose: ()
 // hard：超过即强制重启（无视会话，防止 OOM）
 // 留空 = 使用面板全局默认（来自 env）。
 function InstanceSecurity({ inst, onClose, onDone }: { inst: InstanceWithStatus; onClose: () => void; onDone: () => void }) {
+  const { toast, confirm } = useUI();
   const [data, setData] = useState<import('../api').MemLimits | null>(null);
   // 输入字段：空串 = "使用默认"（→ 提交时映射为 null）
   const [softStr, setSoftStr] = useState('');
@@ -550,6 +551,28 @@ function InstanceSecurity({ inst, onClose, onDone }: { inst: InstanceWithStatus;
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [regenBusy, setRegenBusy] = useState(false);
+
+  const regenMachineId = async () => {
+    const ok = await confirm({
+      title: '重置该实例的设备 ID？',
+      body: '会生成一个全新的设备标识（machine-id）并重启实例，相当于"换一台新设备"。微信需要重新扫码登录。适用于该账号被微信判定设备风险、登录即被强制退出的情况。',
+      danger: true,
+      confirmText: '重置并重启',
+    });
+    if (!ok) return;
+    setRegenBusy(true);
+    try {
+      await api.regenMachineId(inst.id);
+      toast('已重置设备 ID，实例正在重启，请稍后重新扫码登录', 'ok');
+      onClose();
+      onDone();
+    } catch (e: any) {
+      toast(e.message || '重置失败', 'error');
+    } finally {
+      setRegenBusy(false);
+    }
+  };
 
   // 首次加载 + 每 5s 刷新 currentMB（运行实例的实时内存）
   useEffect(() => {
@@ -673,6 +696,22 @@ function InstanceSecurity({ inst, onClose, onDone }: { inst: InstanceWithStatus;
             <div className="muted small" style={{ marginTop: 6 }}>
               提示：日常活跃内存约 1500 MiB；soft 建议略高于此（如 2000），hard 建议远低于宿主可用内存（如 3000~4000）。
             </div>
+
+            <div className="field-label" style={{ marginTop: 16 }}>设备身份（machine-id）</div>
+            <div className="muted small" style={{ lineHeight: 1.6 }}>
+              微信会用设备标识做风控。若该账号被判定<b>设备风险</b>、登录后被强制退出且反复循环，
+              可重置为一个全新的唯一设备 ID（相当于换台新设备），再重新扫码登录。会重启该实例。
+            </div>
+            <button
+              type="button"
+              className="btn"
+              style={{ marginTop: 8, alignSelf: 'flex-start' }}
+              onClick={regenMachineId}
+              disabled={regenBusy || busy}
+            >
+              {regenBusy ? '重置中…' : '↻ 重置设备 ID 并重启'}
+            </button>
+
             {err && <div className="error">{err}</div>}
           </>
         )}

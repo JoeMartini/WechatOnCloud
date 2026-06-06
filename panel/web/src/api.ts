@@ -91,6 +91,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ name, allowedUserIds, reuseVolume: reuseVolume || undefined }),
     }),
+  regenMachineId: (id: string) =>
+    req(`/api/admin/instances/${id}/regen-machine-id`, { method: 'POST' }),
   getInstanceMemLimits: (id: string) =>
     req<MemLimits>(`/api/admin/instances/${id}/mem-limits`),
   setInstanceMemLimits: (id: string, soft: number | null | undefined, hard: number | null | undefined) =>

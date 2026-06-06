@@ -20,6 +20,24 @@ const ENABLE_GPU = process.env.WOC_ENABLE_GPU === '1';
 const INSTANCE_MEM_GB = Number(process.env.WOC_INSTANCE_MEM_GB) || 0;
 const INSTANCE_MEM = INSTANCE_MEM_GB > 0 ? Math.floor(INSTANCE_MEM_GB * 1024 * 1024 * 1024) : 0;
 
+// 设备伪装：把 /etc/os-release 伪装成 deepin（微信官方支持的发行版，且 Deepin 本就基于 Debian，
+// 与本镜像的 Debian 用户态一致，不会自相矛盾）。默认开启；设 WOC_SPOOF_OS=0 关闭恢复 Debian。
+// 配合 00-woc-identity 钩子里的 machine-id 唯一化 + 真实 hostname，整体让容器更像一台普通 Linux 桌面，
+// 降低被腾讯按"非真实设备/设备农场"判风险的概率。注意：尽力而为，非保证；详见 doc/设备伪装.md。
+const SPOOF_OS = process.env.WOC_SPOOF_OS !== '0';
+
+// 给实例容器派生一个"像个人电脑"的内部 hostname（替代 woc-wx-<hex> 这种容器/服务器特征）。
+// 从 inst.id 稳定派生：同一实例每次重建得到相同名字、不同实例不同。仅作伪装，不参与寻址
+// （反代用容器名 containerName，不用此 hostname）。
+function realisticHostname(id: string): string {
+  const words = ['deepin', 'lenovo', 'thinkpad', 'matebook', 'xiaoxin', 'legion', 'dell', 'asus', 'desktop', 'home'];
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  const w = words[h % words.length];
+  const n = ((h >>> 8) % 900) + 100; // 100-999，避免前导 0
+  return `${w}-pc-${n}`;
+}
+
 const docker = new Docker(); // 默认连 /var/run/docker.sock
 
 // 面板自身所在的 docker 网络名；新实例都 attach 到它，便于按容器名互访。
@@ -78,6 +96,8 @@ function envList(inst: Instance): string[] {
   ];
   // baseimage 仅检查该变量是否「已设置」（值无关），设上即不再给 Xvnc 加 -hw3d。
   if (!ENABLE_GPU) env.push('DISABLE_DRI=1');
+  // 透传 os 伪装开关给容器内的 00-woc-identity 钩子（决定是否把 /etc/os-release 改成 deepin）。
+  env.push(`WOC_SPOOF_OS=${SPOOF_OS ? '1' : '0'}`);
   return env;
 }
 
@@ -124,7 +144,9 @@ export async function runInstance(inst: Instance): Promise<void> {
   const container = await docker.createContainer({
     name: inst.containerName,
     Image: WECHAT_IMAGE,
-    Hostname: inst.containerName,
+    // 内部 hostname 伪装成"个人电脑"名（不再用 woc-wx-<hex>，那是容器/服务器特征）。
+    // 反代靠容器名 name 寻址，与此 hostname 无关。
+    Hostname: realisticHostname(inst.id),
     Env: envList(inst),
     ExposedPorts: { '3000/tcp': {} },
     HostConfig: hostConfig,
@@ -162,6 +184,26 @@ export async function upgradeInstance(inst: Instance): Promise<void> {
   } catch (e: any) {
     console.warn('[docker] 升级时拉取镜像失败，改用本地镜像重建:', e?.message || e);
   }
+  await runInstance(inst);
+}
+
+// 重置实例的设备 machine-id：删掉持久化的 .woc-machine-id 后重启，由 00-woc-identity 钩子重新生成
+// 一个全新的唯一值（相当于"换一台新设备"）。用于某账号被腾讯风控标记后手动滚新设备身份。
+// 仅对含身份钩子的新镜像有效；旧镜像（升级前）无钩子，先 throw 提示升级，避免做无用功。
+export async function regenInstanceMachineId(inst: Instance): Promise<void> {
+  const hasHook = (
+    await execCapture(inst, [
+      'sh',
+      '-c',
+      'test -f /custom-cont-init.d/00-woc-identity && echo yes || echo no',
+    ])
+  ).trim();
+  if (hasHook !== 'yes') {
+    throw new Error('该实例运行的是旧镜像（无设备身份模块），请先「升级实例」后再重置设备 ID');
+  }
+  // 删除持久化文件；重启时钩子检测到缺失 → 生成新的唯一 machine-id 并写回卷
+  await execCapture(inst, ['sh', '-c', 'rm -f /config/.woc-machine-id']);
+  await stopInstance(inst);
   await runInstance(inst);
 }
 

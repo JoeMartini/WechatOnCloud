@@ -52,6 +52,7 @@ import {
   listOrphanContainers,
   removeContainerById,
   instanceMemoryMB,
+  regenInstanceMachineId,
 } from './docker.js';
 import { createSession, getSession, destroySession, destroyUserSessions } from './sessions.js';
 import { parseHost, parseAllowedHosts, isAllowedHost } from './host-guard.js';
@@ -408,6 +409,21 @@ app.put('/api/admin/instances/:id/mem-limits', async (req, reply) => {
     return { instance: pub };
   } catch (e: any) {
     return reply.code(400).send({ error: e?.message || '阈值不合法' });
+  }
+});
+
+// 重置实例的设备 machine-id（仅管理员）：滚一个全新的唯一设备身份并重启实例。
+// 用于某微信账号被腾讯按"设备风险"标记、登录即被踢时，像"换台新设备"一样恢复。会触发重新扫码登录。
+app.post('/api/admin/instances/:id/regen-machine-id', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const id = (req.params as any).id;
+  const inst = findInstance(id);
+  if (!inst) return reply.code(404).send({ error: '实例不存在' });
+  try {
+    await regenInstanceMachineId(inst);
+    return { ok: true };
+  } catch (e: any) {
+    return reply.code(400).send({ error: e?.message || '重置设备 ID 失败' });
   }
 });
 
