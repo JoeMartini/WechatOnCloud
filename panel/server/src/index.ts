@@ -158,7 +158,14 @@ app.post('/api/auth/login', async (req, reply) => {
 
 // Auth mode endpoint
 app.get('/api/auth/mode', async (_req, reply) => {
-  reply.send({ mode: process.env.WOC_AUTH_MODE || 'local', oidcLabel: process.env.WOC_OIDC_LABEL || '统一身份登录' });
+  let mode = 'local';
+  try {
+    const fromFile = require('node:fs').readFileSync('/run/secrets/auth_mode', 'utf8').trim();
+    if (fromFile) mode = fromFile;
+  } catch {
+    mode = process.env.WOC_AUTH_TYPE || process.env.WOC_AUTH_MODE || 'local';
+  }
+  reply.send({ mode, oidcLabel: process.env.WOC_OIDC_LABEL || '统一身份登录' });
 });
 
 // OIDC routes
