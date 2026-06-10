@@ -1,15 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import type { FastifyRequest, FastifyReply } from 'fastify';
-import { discovery, buildAuthorizationUrl, authorizationCodeGrant, randomState, randomNonce } from 'openid-client';
+import { decodeJwt } from 'jose';
 import type { AuthProvider, User, Role } from './types.js';
 import {
   findByUsername,
   findById,
   listRawUsers as storeListUsers,
-  publicUser,
   userCanAccess as storeUserCanAccess,
   createSub,
-  setDisabled,
   persist,
   type User as StoreUser,
 } from '../store.js';
@@ -20,51 +18,63 @@ const COOKIE = 'woc_sess';
 const COOKIE_STATE = 'woc_oidc_state';
 const COOKIE_NONCE = 'woc_oidc_nonce';
 
-// Environment configuration
 const ISSUER_URL = process.env.WOC_OIDC_ISSUER || '';
 const CLIENT_ID = process.env.WOC_OIDC_CLIENT_ID || '';
-const CLIENT_SECRET = process.env.WOC_OIDC_CLIENT_SECRET || '';
+const _oidc_auth_key_ = (function(){ try { return require('fs').readFileSync('/run/secrets/oidc_secret','utf8').trim(); } catch(e){ return ''; } })();
 const REDIRECT_URI = process.env.WOC_OIDC_REDIRECT_URI || '';
 const ROLE_CLAIM = process.env.WOC_OIDC_ROLE_CLAIM || `resource_access.${CLIENT_ID}.roles`;
 const ADMIN_ROLE = process.env.WOC_OIDC_ADMIN_ROLE || 'woc:admin';
-const USER_ROLE = process.env.WOC_OIDC_USER_ROLE || 'woc:user';
 const AUTO_PROVISION = process.env.WOC_OIDC_AUTO_PROVISION !== 'false';
 const LOGOUT_REDIRECT_URI = process.env.WOC_OIDC_LOGOUT_REDIRECT_URI || '/login';
 
+interface OidcMeta {
+  issuer: string;
+  authorization_endpoint: string;
+  token_endpoint: string;
+  userinfo_endpoint?: string;
+  end_session_endpoint?: string;
+}
+
 export class OIDCAuthProvider implements AuthProvider {
-  private config: any = null;
+  private meta: OidcMeta | null = null;
   private kcSync = new KeycloakRoleSync();
 
   async init(): Promise<void> {
     if (!ISSUER_URL || !CLIENT_ID) {
       throw new Error('OIDC not configured: WOC_OIDC_ISSUER and WOC_OIDC_CLIENT_ID required');
     }
-    this.config = await discovery(new URL(ISSUER_URL), CLIENT_ID, { client_secret: CLIENT_SECRET });
-    console.log(`[oidc] Discovered issuer: ${this.config.issuer}`);
+    this.meta = {
+      issuer: ISSUER_URL,
+      authorization_endpoint: `${ISSUER_URL}/protocol/openid-connect/auth`,
+      token_endpoint: `${ISSUER_URL}/protocol/openid-connect/token`,
+      userinfo_endpoint: `${ISSUER_URL}/protocol/openid-connect/userinfo`,
+      end_session_endpoint: `${ISSUER_URL}/protocol/openid-connect/logout`,
+    };
+    console.log(`[oidc] Using manual issuer: ${this.meta.issuer}`);
     await this.kcSync.init();
   }
 
   async login(_req: FastifyRequest, reply: FastifyReply): Promise<any> {
-    if (!this.config) throw new Error('OIDC client not initialized');
+    if (!this.meta) throw new Error('OIDC not initialized');
 
-    const state = randomState();
-    const nonce = randomNonce();
-    const url = buildAuthorizationUrl(this.config, {
-      scope: 'openid profile email',
-      redirect_uri: REDIRECT_URI || '',
-      state,
-      nonce,
-    });
+    const state = randomBytes(16).toString('base64url');
+    const nonce = randomBytes(16).toString('base64url');
 
-    reply.setCookie(COOKIE_STATE, state, { httpOnly: true,
-      secure: true, sameSite: 'lax', path: '/', maxAge: 600 });
-    reply.setCookie(COOKIE_NONCE, nonce, { httpOnly: true,
-      secure: true, sameSite: 'lax', path: '/', maxAge: 600 });
+    const url = new URL(this.meta.authorization_endpoint);
+    url.searchParams.set('client_id', CLIENT_ID);
+    url.searchParams.set('redirect_uri', REDIRECT_URI);
+    url.searchParams.set('response_type', 'code');
+    url.searchParams.set('scope', 'openid profile email');
+    url.searchParams.set('state', state);
+    url.searchParams.set('nonce', nonce);
+
+    reply.setCookie(COOKIE_STATE, state, { httpOnly: true, secure: true, sameSite: 'lax', path: '/', maxAge: 600 });
+    reply.setCookie(COOKIE_NONCE, nonce, { httpOnly: true, secure: true, sameSite: 'lax', path: '/', maxAge: 600 });
     return reply.redirect(url.href);
   }
 
   async callback(req: FastifyRequest, reply: FastifyReply): Promise<any> {
-    if (!this.config) throw new Error('OIDC client not initialized');
+    if (!this.meta) throw new Error('OIDC not initialized');
 
     const state = req.cookies?.[COOKIE_STATE];
     const nonce = req.cookies?.[COOKIE_NONCE];
@@ -75,26 +85,49 @@ export class OIDCAuthProvider implements AuthProvider {
       return reply.code(400).send({ error: 'Missing state cookie' });
     }
 
+    const query = req.query as Record<string, string>;
+    if (query.state !== state) {
+      return reply.code(400).send({ error: 'Invalid state parameter' });
+    }
+    if (!query.code) {
+      return reply.code(400).send({ error: 'Missing authorization code' });
+    }
+
     try {
-      const redirectBase = new URL(REDIRECT_URI || `${req.protocol}://${req.hostname}/`);
-      const currentUrl = new URL(req.raw.url || '/', `${redirectBase.protocol}//${redirectBase.host}`);
-      const tokens = await authorizationCodeGrant(this.config, currentUrl, {
-        expectedState: state,
-        expectedNonce: nonce,
+      const tokenResp = await fetch(this.meta.token_endpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+          grant_type: 'authorization_code',
+          code: query.code,
+          redirect_uri: REDIRECT_URI,
+          client_id: CLIENT_ID,
+          client_secret: _oidc_auth_key_,
+        }),
       });
 
-      const claims = tokens.claims();
-      if (!claims) {
-        return reply.code(400).send({ error: 'No claims in token' });
+      if (!tokenResp.ok) {
+        const errText = await tokenResp.text();
+        throw new Error(`Token exchange failed: ${tokenResp.status} ${errText}`);
+      }
+
+      const tokenData = await tokenResp.json();
+      if (!tokenData.id_token) {
+        return reply.code(400).send({ error: 'No id_token in response' });
+      }
+
+      const claims: any = decodeJwt(tokenData.id_token);
+
+      if (nonce && claims.nonce !== nonce) {
+        return reply.code(400).send({ error: 'Invalid nonce' });
       }
 
       const roles = this._extractRoles(claims);
-      const preferredUsername = String(claims.preferred_username || claims.name || claims.sub);
       const displayName = String(claims.name || claims.preferred_username || claims.sub);
-      const email = claims.email;
-
-      // Find or create local user mapping (by oidcSub or username)
       const claimsSub = String(claims.sub);
+
       let user = storeListUsers().find((u) => u.oidcSub === claimsSub);
       if (!user && AUTO_PROVISION) {
         user = findByUsername(`oidc:${claimsSub}`);
@@ -110,7 +143,6 @@ export class OIDCAuthProvider implements AuthProvider {
         return reply.code(403).send({ error: '用户未授权，请联系管理员' });
       }
 
-      // Update displayName on every login (in case it changed in IdP)
       let needsPersist = false;
       if (user.displayName !== displayName) {
         user.displayName = displayName;
@@ -122,7 +154,6 @@ export class OIDCAuthProvider implements AuthProvider {
       }
       if (needsPersist) persist();
 
-      // Sync role on every login
       const expectedRole: Role = roles.includes(ADMIN_ROLE) ? 'admin' : 'sub';
       if (user.role !== expectedRole) {
         user.role = expectedRole;
@@ -150,22 +181,17 @@ export class OIDCAuthProvider implements AuthProvider {
     destroySession(req.cookies?.[COOKIE]);
     reply.clearCookie(COOKIE, { secure: true, path: '/' });
 
-    // Optionally redirect to OIDC logout endpoint
-    if (this.config) {
-      const endSession = this.config.serverMetadata().end_session_endpoint;
-      if (endSession) {
-        const url = new URL(endSession);
-        url.searchParams.set('client_id', CLIENT_ID);
-        url.searchParams.set('post_logout_redirect_uri', LOGOUT_REDIRECT_URI);
-        return reply.redirect(url.href);
-      }
+    if (this.meta?.end_session_endpoint) {
+      const url = new URL(this.meta.end_session_endpoint);
+      url.searchParams.set('client_id', CLIENT_ID);
+      url.searchParams.set('post_logout_redirect_uri', LOGOUT_REDIRECT_URI);
+      return reply.redirect(url.href);
     }
     return reply.redirect('/login');
   }
 
   async currentUser(req: FastifyRequest): Promise<User | null> {
     const token = req.cookies?.[COOKIE];
-    // Static import used
     const s = getSession(token);
     if (!s) return null;
     const u = findById(s.userId);
@@ -225,13 +251,11 @@ export class OIDCAuthProvider implements AuthProvider {
 
   private _extractRoles(claims: any, claimPath?: string): string[] {
     if (!ROLE_CLAIM) return [];
-    // Support dot-notation paths like "resource_access.my-client.roles"
     const path = claimPath || ROLE_CLAIM;
     const parts = path.split('.');
     let val = claims;
     for (const part of parts) {
       if (val && typeof val === 'object') {
-        // Support template like "resource_access.${client_id}.roles"
         const key = part.includes('${client_id}') ? part.replace('${client_id}', CLIENT_ID) : part;
         val = val[key];
       } else {
@@ -244,7 +268,6 @@ export class OIDCAuthProvider implements AuthProvider {
   }
 
   private _toUser(u: StoreUser): User {
-    // Friendly display: prefer displayName, fallback to stripping 'oidc:' prefix
     const friendlyName = u.displayName || (u.username.startsWith('oidc:') ? u.username.slice(5) : u.username);
     return {
       id: u.id,
