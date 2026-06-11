@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
 import fstatic from '@fastify/static';
@@ -160,7 +161,7 @@ app.post('/api/auth/login', async (req, reply) => {
 app.get('/api/auth/mode', async (_req, reply) => {
   let mode = 'local';
   try {
-    const fromFile = require('node:fs').readFileSync('/run/secrets/auth_mode', 'utf8').trim();
+    const fromFile = readFileSync('/run/secrets/auth_mode', 'utf8').trim();
     if (fromFile) mode = fromFile;
   } catch {
     mode = process.env.WOC_AUTH_TYPE || process.env.WOC_AUTH_MODE || 'local';

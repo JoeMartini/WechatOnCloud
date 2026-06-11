@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import type { FastifyRequest, FastifyReply } from 'fastify';
 import { decodeJwt } from 'jose';
@@ -20,7 +21,7 @@ const COOKIE_NONCE = 'woc_oidc_nonce';
 
 const ISSUER_URL = process.env.WOC_OIDC_ISSUER || '';
 const CLIENT_ID = process.env.WOC_OIDC_CLIENT_ID || '';
-const _oidc_auth_key_ = (function(){ try { return require('fs').readFileSync('/run/secrets/oidc_secret','utf8').trim(); } catch(e){ return ''; } })();
+const _oidc_auth_key_ = (function(){ try { return readFileSync('/run/secrets/oidc_secret','utf8').trim(); } catch(e){ return ''; } })();
 const REDIRECT_URI = process.env.WOC_OIDC_REDIRECT_URI || '';
 const ROLE_CLAIM = process.env.WOC_OIDC_ROLE_CLAIM || `resource_access.${CLIENT_ID}.roles`;
 const ADMIN_ROLE = process.env.WOC_OIDC_ADMIN_ROLE || 'woc:admin';
@@ -94,18 +95,21 @@ export class OIDCAuthProvider implements AuthProvider {
     }
 
     try {
+      const tokenBody: Record<string, string> = {
+        grant_type: 'authorization_code',
+        code: query.code,
+        redirect_uri: REDIRECT_URI,
+        client_id: CLIENT_ID,
+      };
+      if (_oidc_auth_key_) {
+        tokenBody.client_secret = _oidc_auth_key_;
+      }
       const tokenResp = await fetch(this.meta.token_endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
         },
-        body: new URLSearchParams({
-          grant_type: 'authorization_code',
-          code: query.code,
-          redirect_uri: REDIRECT_URI,
-          client_id: CLIENT_ID,
-          client_secret: _oidc_auth_key_,
-        }),
+        body: new URLSearchParams(tokenBody),
       });
 
       if (!tokenResp.ok) {
