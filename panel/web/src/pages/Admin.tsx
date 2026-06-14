@@ -588,9 +588,11 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
             </div>
             <div className="inst-sub">{isAdmin ? '可访问全部实例' : `可访问 ${user?.allowedInstances.length ?? 0} 个实例`}</div>
             <div className="inst-actions">
-              <button className="btn btn-primary inst-act-wide" onClick={onChangePassword}>
-                修改密码
-              </button>
+              {allowLocalMgmt && (
+                <button className="btn btn-primary inst-act-wide" onClick={onChangePassword}>
+                  修改密码
+                </button>
+              )}
             </div>
           </div>
         </div>
