@@ -18,6 +18,57 @@ APP_TYPE="${WOC_APP_TYPE:-wechat}"
 . /woc/app-defs.sh
 woc_app_def "$APP_TYPE"
 
+# 深色模式（freedesktop 桌面 portal 方案）。微信内核是 Chromium，它判断"系统是否深色"读的是 portal 的
+# org.freedesktop.appearance→color-scheme（D-Bus 信号），不是 GTK_THEME/settings.ini（那只影响纯 GTK chrome）。
+# 极简 KasmVNC 默认无 portal，故每个实例都常驻一套 session D-Bus + xdg-desktop-portal(gtk 后端) + dconf：
+#   - 这样面板顶栏的主题开关能"远程拨开关"实时切换实例深色（面板 docker exec 改 gsettings color-scheme →
+#     portal 发 SettingChanged → 微信实时重绘），无需重启实例；
+#   - 初始明暗由 WOC_DARK 决定（面板把开关持久化、经容器环境下发），微信由本脚本拉起、继承这套环境，启动即跟随。
+# 这些服务空闲极轻、且与 VNC 连接完全无关（不参与重连/重启），不影响连接稳定性。总线地址固定，便于 exec 复用。
+# 整段 best-effort：任一步失败都不阻断后续启动应用。
+woc_setup_portal() {
+    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/woc-run-$(id -u)}"
+    mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null && chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
+    # 让 xdg-desktop-portal 明确选用 gtk 后端来实现 Settings（即 color-scheme 来源）
+    export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-GNOME}"
+    _xcfg="${HOME:-/config}/.config/xdg-desktop-portal"
+    mkdir -p "$_xcfg" 2>/dev/null || true
+    printf '[preferred]\ndefault=gtk\norg.freedesktop.impl.portal.Settings=gtk\n' >"$_xcfg/portals.conf" 2>/dev/null || true
+    # 固定地址的 session 总线：微信（本脚本拉起，继承此变量）与面板 docker exec 的 woc-dark.sh 用同一条，
+    # 改的才是同一个 dconf、portal 才读得到。已在跑（socket 存在）则复用。
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/woc-bus"
+    if [ ! -S "${XDG_RUNTIME_DIR}/woc-bus" ] && command -v dbus-daemon >/dev/null 2>&1; then
+        dbus-daemon --session --address="$DBUS_SESSION_BUS_ADDRESS" --nopidfile --fork 2>/dev/null || true
+        _i=0; while [ ! -S "${XDG_RUNTIME_DIR}/woc-bus" ] && [ "$_i" -lt 25 ]; do sleep 0.2; _i=$((_i + 1)); done
+    fi
+    [ -S "${XDG_RUNTIME_DIR}/woc-bus" ] || { echo "[autostart] 深色：session 总线未就绪，跳过 portal"; return 0; }
+    # 把环境推进总线的"激活环境"，使 dbus 激活起来的 portal 能看到 DISPLAY/XDG_CURRENT_DESKTOP 等
+    command -v dbus-update-activation-environment >/dev/null 2>&1 && \
+        dbus-update-activation-environment --all >/dev/null 2>&1 || true
+    # 初始明暗（dconf 共享后端，portal 据此对外报告；之后面板 woc-dark.sh 改这同一个键即实时切换）
+    if command -v gsettings >/dev/null 2>&1; then
+        if [ "${WOC_DARK:-}" = "1" ] || [ "${WOC_DARK:-}" = "true" ]; then
+            gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' 2>/dev/null || true
+            gsettings set org.gnome.desktop.interface gtk-theme 'Adwaita-dark' 2>/dev/null || true
+        else
+            gsettings set org.gnome.desktop.interface color-scheme 'default' 2>/dev/null || true
+            gsettings set org.gnome.desktop.interface gtk-theme 'Adwaita' 2>/dev/null || true
+        fi
+    fi
+    # 显式拉起 portal（gtk 后端提供 Settings；比纯 dbus 激活更稳，重复启动会自行退出、无害）
+    for _b in xdg-desktop-portal-gtk xdg-desktop-portal; do
+        for _d in /usr/libexec /usr/lib/xdg-desktop-portal /usr/lib; do
+            if [ -x "$_d/$_b" ]; then ( "$_d/$_b" >/dev/null 2>&1 & ); break; fi
+        done
+    done
+    echo "[autostart] 深色 portal 已就绪（初始 $([ "${WOC_DARK:-}" = "1" ] || [ "${WOC_DARK:-}" = "true" ] && echo prefer-dark || echo light)）"
+}
+woc_setup_portal || true
+# Chromium 实例（浏览器）初始深色再加 app 级强制（UI + 网页）；微信不吃命令行参数，靠 portal 信号实时跟随。
+if { [ "${WOC_DARK:-}" = "1" ] || [ "${WOC_DARK:-}" = "true" ]; } && [ "$APP_TYPE" = "chromium" ]; then
+    APP_LAUNCH="${APP_LAUNCH} --force-dark-mode --enable-features=WebContentsForceDark"
+fi
+
 # 防“最小化后丢失”：本桌面（openbox）无任务栏，窗口被最小化就无处恢复 → 黑屏。
 # 看守进程：每 2s 把“被最小化（不可见）”的顶层窗口重新激活，相当于禁用最小化。对任意应用通用。
 (

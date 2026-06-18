@@ -52,6 +52,22 @@ RUN set -eux; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
 
+# 深色模式支持（仅在实例环境 WOC_DARK=1 时由 autostart 启用）。微信内核是 Chromium，它判断"系统是否深色"
+# 读的是 freedesktop 桌面 portal 的 org.freedesktop.appearance→color-scheme（D-Bus 信号），而非 GTK_THEME。
+# 极简 KasmVNC 镜像默认没有 portal，故装上 xdg-desktop-portal + gtk 后端 + dconf/gsettings：autostart 据
+# WOC_DARK 跑一条 session 总线、把 color-scheme 设为 prefer-dark 并拉起 portal，微信启动即跟随系统深色。
+# 单独成层，避免动到上面缓存的安装层；关闭深色时这些服务完全不启动，零影响旧有稳定行为。
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        dbus-x11 \
+        xdg-desktop-portal \
+        xdg-desktop-portal-gtk \
+        dconf-service dconf-gsettings-backend \
+        gsettings-desktop-schemas; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
+
 ENV LANG=zh_CN.UTF-8 \
     LC_ALL=zh_CN.UTF-8 \
     LIBGL_ALWAYS_SOFTWARE=1
@@ -69,6 +85,11 @@ RUN chmod 755 /woc/woc-www-patch.sh && chmod 644 /woc/woc-ime.pl && /woc/woc-www
 # 微信下载/解压控制脚本（运行时由面板经 docker exec 触发，状态写入数据卷 /config/.woc-state）
 COPY wechat-ctl.sh /woc/wechat-ctl.sh
 RUN chmod 755 /woc/wechat-ctl.sh
+
+# 深色模式实时切换脚本：面板顶栏主题开关 → 经 docker exec 调用，改 gsettings color-scheme，
+# portal 通知微信实时重绘（见 woc-dark.sh / autostart 的 portal 段）
+COPY woc-dark.sh /woc/woc-dark.sh
+RUN chmod 755 /woc/woc-dark.sh
 
 # v1.2.0 多应用：应用定义（app-defs.sh，被 autostart/app-ctl 引用）+ 通用安装/状态控制（app-ctl.sh，
 # 微信委托回 wechat-ctl.sh、其它应用各自实现）。app-defs.sh 是被 source 的、不需可执行位。

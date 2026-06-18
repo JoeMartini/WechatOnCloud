@@ -4,7 +4,7 @@ import { appendInstanceLog, deleteInstanceLog, appendPanelLog, readInstanceLog, 
 import http from 'node:http';
 import zlib from 'node:zlib';
 import Docker from 'dockerode';
-import { instanceAppType, type Instance } from './store.js';
+import { instanceAppType, getDesktopDark, type Instance } from './store.js';
 
 const WECHAT_IMAGE = process.env.WOC_WECHAT_IMAGE || 'ghcr.io/gloridust/wechat-on-cloud:latest';
 const PUID = process.env.PUID || '1000';
@@ -120,6 +120,10 @@ function envList(inst: Instance): string[] {
   const appType = instanceAppType(inst);
   env.push(`WOC_APP_TYPE=${appType}`);
   if (appType === 'custom' && inst.customLaunch) env.push(`WOC_CUSTOM_LAUNCH=${inst.customLaunch}`);
+  // 深色模式：作为新实例启动时的初始明暗下发给 autostart（autostart 据此设 portal color-scheme，
+  // 微信等 Chromium 系应用即跟随系统深色）。开关由面板顶栏主题统一控制、持久化在 accounts.json，
+  // 运行中的实例则通过 setInstanceDark 实时切换（见下）。
+  if (getDesktopDark()) env.push('WOC_DARK=1');
   return env;
 }
 
@@ -424,6 +428,13 @@ async function execCapture(inst: Instance, cmd: string[]): Promise<string> {
     });
     stream.on('error', reject);
   });
+}
+
+// 实时切换运行中实例的桌面深色：以 app 用户身份执行 /woc/woc-dark.sh on|off，它经同一条 session 总线
+// 改 gsettings color-scheme → portal 发 SettingChanged → 微信等实时重绘。容器须为升级后镜像（含该脚本与
+// portal）；旧镜像没有脚本会报错，调用方按"best-effort"忽略即可（重启实例后即用新镜像、自动跟随）。
+export async function setInstanceDark(inst: Instance, dark: boolean): Promise<void> {
+  await execCapture(inst, ['/woc/woc-dark.sh', dark ? 'on' : 'off']);
 }
 
 // 触发下载/安装（detached，立即返回，后台下载）。按实例 appType 分发：app-ctl.sh wechat → 委托回

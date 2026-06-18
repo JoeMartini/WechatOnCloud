@@ -29,6 +29,8 @@ import {
   setInstanceIcon,
   setInstanceUsers,
   publicInstance,
+  getDesktopDark,
+  setDesktopDark,
   APP_TYPES,
   type AppType,
   type User,
@@ -42,6 +44,7 @@ import {
   upgradeInstance,
   removeInstance as removeInstanceContainer,
   instanceRuntime,
+  setInstanceDark,
   triggerWechat,
   wechatStatus,
   instanceTarget,
@@ -198,6 +201,37 @@ app.post('/api/admin/version/self-update', async (req, reply) => {
     appendPanelLog('ERROR', `面板自更新失败：${e?.message || e}`);
     return reply.code(500).send({ error: '更新失败：' + (e?.message || e) });
   }
+});
+
+// ---------- 实例桌面深色（与面板主题统一的那个开关）----------
+// 读取当前实例深色状态（任何登录用户可读，用于前端同步主题开关与实例的一致性）。
+app.get('/api/desktop-theme', async (req, reply) => {
+  if (!requireAuth(req, reply)) return;
+  return { dark: getDesktopDark() };
+});
+// 设置实例深色（管理员）。面板顶栏主题开关切到 深/浅 时调用：持久化 → 对所有运行中的实例实时切换
+// （docker exec woc-dark.sh）。实时切换为 best-effort：个别实例失败（如旧镜像无该脚本）不影响其余，
+// 重启该实例后即用新镜像、按持久化的初始明暗启动。
+app.post('/api/admin/desktop-theme', async (req, reply) => {
+  if (!requireAdmin(req, reply)) return;
+  const dark = !!(req.body as any)?.dark;
+  setDesktopDark(dark);
+  let applied = 0;
+  let failed = 0;
+  const insts = listInstances();
+  await Promise.all(
+    insts.map(async (inst) => {
+      try {
+        if ((await instanceRuntime(inst)) !== 'running') return;
+        await setInstanceDark(inst, dark);
+        applied++;
+      } catch {
+        failed++; // 旧镜像/总线未就绪等：忽略，重启实例即生效
+      }
+    }),
+  );
+  appendPanelLog('INFO', `实例深色设为 ${dark ? '深色' : '浅色'}（实时应用 ${applied} 个，${failed} 个待重启生效）`);
+  return { ok: true, dark, applied, failed };
 });
 
 // ---------- 自助改密 ----------
