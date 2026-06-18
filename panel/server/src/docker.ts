@@ -430,13 +430,6 @@ async function execCapture(inst: Instance, cmd: string[]): Promise<string> {
   });
 }
 
-// 实时切换运行中实例的桌面深色：以 app 用户身份执行 /woc/woc-dark.sh on|off，它经同一条 session 总线
-// 改 gsettings color-scheme → portal 发 SettingChanged → 微信等实时重绘。容器须为升级后镜像（含该脚本与
-// portal）；旧镜像没有脚本会报错，调用方按"best-effort"忽略即可（重启实例后即用新镜像、自动跟随）。
-export async function setInstanceDark(inst: Instance, dark: boolean): Promise<void> {
-  await execCapture(inst, ['/woc/woc-dark.sh', dark ? 'on' : 'off']);
-}
-
 // 触发下载/安装（detached，立即返回，后台下载）。按实例 appType 分发：app-ctl.sh wechat → 委托回
 // wechat-ctl.sh；telegram 等各自实现。兼容旧容器（升级前镜像里没有 /woc/app-ctl.sh）：有则用之，无则
 // 回退老的 wechat-ctl.sh（旧实例都是微信）。appType 取值受 instanceAppType 约束，可安全内插进 shell。

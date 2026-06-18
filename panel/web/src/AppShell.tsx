@@ -315,7 +315,7 @@ function ThemeToggle() {
   };
   const label = mode === 'auto' ? '跟随系统' : mode === 'light' ? '亮色' : '深色';
   const hint = isAdmin
-    ? `主题：${label}（同时切换面板与实例桌面深色；点击循环：跟随系统 / 亮色 / 深色）`
+    ? `主题：${label}（面板即时换肤；浏览器实例重启后跟随。点击循环：跟随系统 / 亮色 / 深色）`
     : `主题：${label}（点击切换：跟随系统 / 亮色 / 深色）`;
   return (
     <button className="theme-toggle" onClick={cycle} title={hint} aria-label={`主题：${label}`}>

@@ -44,7 +44,6 @@ import {
   upgradeInstance,
   removeInstance as removeInstanceContainer,
   instanceRuntime,
-  setInstanceDark,
   triggerWechat,
   wechatStatus,
   instanceTarget,
@@ -209,29 +208,15 @@ app.get('/api/desktop-theme', async (req, reply) => {
   if (!requireAuth(req, reply)) return;
   return { dark: getDesktopDark() };
 });
-// 设置实例深色（管理员）。面板顶栏主题开关切到 深/浅 时调用：持久化 → 对所有运行中的实例实时切换
-// （docker exec woc-dark.sh）。实时切换为 best-effort：个别实例失败（如旧镜像无该脚本）不影响其余，
-// 重启该实例后即用新镜像、按持久化的初始明暗启动。
+// 设置实例深色（管理员）。面板顶栏主题开关切到 深/浅 时调用：持久化即可。它作为浏览器(Chromium)实例
+// 启动时的明暗（经 envList → WOC_DARK 下发，autostart 据此加 --force-dark-mode），故**重启实例后生效**，
+// 不做在线切换（极简容器内无稳定的桌面 portal，微信也不跟随，详见 docker/autostart 注释）。
 app.post('/api/admin/desktop-theme', async (req, reply) => {
   if (!requireAdmin(req, reply)) return;
   const dark = !!(req.body as any)?.dark;
   setDesktopDark(dark);
-  let applied = 0;
-  let failed = 0;
-  const insts = listInstances();
-  await Promise.all(
-    insts.map(async (inst) => {
-      try {
-        if ((await instanceRuntime(inst)) !== 'running') return;
-        await setInstanceDark(inst, dark);
-        applied++;
-      } catch {
-        failed++; // 旧镜像/总线未就绪等：忽略，重启实例即生效
-      }
-    }),
-  );
-  appendPanelLog('INFO', `实例深色设为 ${dark ? '深色' : '浅色'}（实时应用 ${applied} 个，${failed} 个待重启生效）`);
-  return { ok: true, dark, applied, failed };
+  appendPanelLog('INFO', `实例深色设为 ${dark ? '深色' : '浅色'}（浏览器实例重启后生效）`);
+  return { ok: true, dark };
 });
 
 // ---------- 自助改密 ----------
