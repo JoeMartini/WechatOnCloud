@@ -271,7 +271,7 @@ Maintained by [Hermes-Martini-Home](https://github.com/JoeMartini) · [Upstream 
 
 ## 致谢
 
-创意启发自懒猫微服（原 Deepin 团队做的硬件产品），推荐有经济实力、追求稳定运营的朋友尝试！
+创意启发自懒猫微服，请自行判断是否值得入手。
 
 也感谢每一位 Star / Issue / PR 的朋友——**两天突破 500 ⭐**，是继续打磨的最大动力 🙌
 
