@@ -403,10 +403,28 @@ export async function instanceRuntime(inst: Instance): Promise<RuntimeState> {
   }
 }
 
+// 创建 exec 实例。容器 init 未完成时，linuxserver 基镜像的 'abc' 用户可能还没建好，docker 会以
+// 400「unable to find user abc: no matching entries in passwd file」直接拒绝创建 exec（见 issue #74）。
+// 对这种"用户未就绪"错误短暂重试，给容器 init 一点时间；超时则抛清晰的中文错误，而非透传难懂的 docker 400。
+async function execCreate(c: any, opts: any): Promise<any> {
+  let lastErr: any;
+  for (let i = 0; i < 8; i++) {
+    try {
+      return await c.exec(opts);
+    } catch (e: any) {
+      const msg = String(e?.message || e);
+      if (!/no matching entries in passwd|unable to find user/i.test(msg)) throw e;
+      lastErr = e;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+  throw new Error(`容器仍在初始化（桌面用户未就绪），请等待约十几秒后重试（${lastErr?.message || lastErr}）`);
+}
+
 // 在实例容器内执行命令，返回 stdout；若命令失败，把 stderr 透出给调用方。
 async function execCapture(inst: Instance, cmd: string[]): Promise<string> {
   const c = docker.getContainer(inst.containerName);
-  const exec = await c.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false, User: 'abc' });
+  const exec = await execCreate(c, { Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false, User: 'abc' });
   const stream = await exec.start({ hijack: true, stdin: false });
   return await new Promise<string>((resolve, reject) => {
     let out = '';
@@ -437,7 +455,7 @@ export async function triggerWechat(inst: Instance, cmd: 'install' | 'update'): 
   const c = docker.getContainer(inst.containerName);
   const at = instanceAppType(inst);
   const action = cmd === 'update' ? 'update' : 'install';
-  const exec = await c.exec({
+  const exec = await execCreate(c, {
     Cmd: ['bash', '-c', `if [ -x /woc/app-ctl.sh ]; then /woc/app-ctl.sh ${at} ${action}; else /woc/wechat-ctl.sh ${action}; fi`],
     AttachStdout: false,
     AttachStderr: false,
@@ -576,7 +594,11 @@ export async function buildDiagnostics(instances: Instance[], sinceMs: number, m
     const info: any = await docker.info();
     sys += `容器: ${info.Containers}（运行 ${info.ContainersRunning}） · 镜像: ${info.Images}\n`;
     sys += `内核: ${info.KernelVersion} · OS: ${info.OperatingSystem} · 架构: ${info.Architecture}\n`;
-    sys += `CPU: ${info.NCPU} 核 · 内存: ${(info.MemTotal / 1073741824).toFixed(1)} GiB\n`;
+    sys += `CPU: ${info.NCPU} 核 · 内存: ${(info.MemTotal / 1073741824).toFixed(1)} GiB · 内存限制支持: ${info.MemoryLimit ? '是' : '否'} · Swap限制支持: ${info.SwapLimit ? '是' : '否'}\n`;
+    // cgroup / 存储 / 安全选项：排查 Ubuntu server 上的内存限制不生效、apparmor/userns 限制、seccomp 等宿主级问题。
+    sys += `cgroup: v${info.CgroupVersion ?? '?'}/${info.CgroupDriver ?? '?'} · 存储驱动: ${info.Driver}\n`;
+    if (Array.isArray(info.SecurityOptions) && info.SecurityOptions.length)
+      sys += `安全选项: ${info.SecurityOptions.map((o: string) => o.replace(/^name=/, '')).join(', ')}\n`;
     if (Array.isArray(info.Warnings) && info.Warnings.length) sys += `Docker 警告: ${info.Warnings.join('; ')}\n`;
   } catch (e: any) {
     sys += `Docker info: 获取失败 ${e?.message || e}\n`;
@@ -587,6 +609,12 @@ export async function buildDiagnostics(instances: Instance[], sinceMs: number, m
   } catch {
     sys += `\n实例镜像 ${WECHAT_IMAGE}: 本地不存在（首次新建实例需联网拉取，可能在此卡住）\n`;
   }
+  // 面板侧实例资源配置（排查内存：默认不设 docker 硬上限时，单实例涨太大会被宿主内核 OOM-killer 杀，
+  // 在小内存 Ubuntu server 上尤其常见，表现为黑屏/502/反复重启）。
+  sys += `\n面板实例配置: SHM=${(SHM_SIZE / 1073741824).toFixed(0)}GiB`;
+  sys += ` · docker硬内存上限=${INSTANCE_MEM > 0 ? (INSTANCE_MEM / 1073741824).toFixed(1) + 'GiB' : '未设(不限，靠宿主 OOM 兜底)'}`;
+  sys += ` · GPU=${ENABLE_GPU ? '开' : '关(软件渲染)'}\n`;
+  sys += `内存自愈阈值(MiB): soft=${process.env.WOC_INSTANCE_MEM_SOFT_MB || '1500'} · hard=${process.env.WOC_INSTANCE_MEM_HARD_MB || '2500'}\n`;
   sys += `\n实例数: ${instances.length}\n`;
   entries.push({ name: 'system.txt', content: sys });
 
@@ -602,6 +630,15 @@ export async function buildDiagnostics(instances: Instance[], sinceMs: number, m
       c += `===== 容器状态 =====\n运行: ${s.Running} · 状态: ${s.Status} · 退出码: ${s.ExitCode}\n`;
       c += `OOMKilled: ${s.OOMKilled} · 重启次数: ${info.RestartCount} · 启动于: ${s.StartedAt}\n`;
       if (s.Error) c += `错误: ${s.Error}\n`;
+      // 实时内存占用：配合宿主总内存/OOMKilled 一眼判断是不是内存不足（小内存 server 的高频成因）。
+      if (s.Running) {
+        try {
+          const mem = await instanceMemoryMB(inst);
+          if (mem > 0) c += `当前内存占用: ${mem} MiB\n`;
+        } catch {
+          /* stats 偶发不可用，忽略 */
+        }
+      }
       c += `镜像: ${String(info.Image).slice(0, 19)} · 健康: ${s.Health?.Status ?? 'n/a'}\n\n`;
     } catch (e: any) {
       c += `===== 容器状态 =====\n无法读取（容器可能未创建/已删除）：${e?.message || e}\n\n`;

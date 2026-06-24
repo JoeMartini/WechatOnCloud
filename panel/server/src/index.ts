@@ -1036,12 +1036,41 @@ proxy.on('proxyReqWs', (proxyReq, req) => {
 proxy.on('proxyRes', (proxyRes) => {
   delete proxyRes.headers['www-authenticate'];
 });
-proxy.on('error', (_err, _req, res) => {
+// 上游（实例 Web）暂时连不上时，给浏览器导航请求回一个「自动重连」的友好页面，而不是死的纯文本。
+// 实例在 创建初始化 / 升级 / 重启 / 内存自愈软重启，以及面板自更新（代理短暂中断）时都会短暂 502，
+// 几秒后即恢复；旧版回纯文本"桌面服务暂时不可用"且 iframe 一旦载入它就判 frameLoaded=true、不再重试，
+// 用户就卡在黑屏死页（用户反馈的"新版黑屏 桌面服务暂不可用"）。此页每 3s 自动重载，实例一就绪即自动连上；
+// 连续约 30s 仍不行才转手动重试，并按 20s 间隔重置计数（区分新一轮故障）。
+const UPSTREAM_DOWN_HTML =
+  `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">` +
+  `<meta name="viewport" content="width=device-width,initial-scale=1"><title>桌面连接中…</title><style>` +
+  `html,body{height:100%;margin:0}body{display:flex;align-items:center;justify-content:center;background:#14161c;` +
+  `color:#e7eaef;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}.box{text-align:center;` +
+  `max-width:340px;padding:24px}.sp{width:34px;height:34px;border:3px solid rgba(255,255,255,.16);border-top-color:#07C160;` +
+  `border-radius:50%;margin:0 auto 16px;animation:r 1s linear infinite}@keyframes r{to{transform:rotate(360deg)}}` +
+  `.t{font-size:15px;font-weight:600}.s{font-size:13px;color:#969ca6;margin-top:8px;line-height:1.6}.b{margin-top:18px;` +
+  `display:none}button{background:#07C160;color:#fff;border:0;border-radius:999px;padding:9px 22px;font-size:14px;cursor:pointer}` +
+  `</style></head><body><div class="box"><div class="sp" id="sp"></div><div class="t" id="t">桌面正在启动 / 重连中…</div>` +
+  `<div class="s" id="s">实例重启或初始化时会短暂不可用，将自动重连，请稍候。</div>` +
+  `<div class="b" id="b"><button onclick="location.reload()">重试</button></div></div><script>(function(){` +
+  `function rl(){location.reload()}try{var K='woc_up_retry',now=Date.now(),o={};try{o=JSON.parse(sessionStorage.getItem(K)||'{}')}catch(e){}` +
+  `var n=(now-(o.t||0)>20000)?1:((o.n||0)+1);sessionStorage.setItem(K,JSON.stringify({n:n,t:now}));` +
+  `if(n<=10){setTimeout(rl,3000)}else{document.getElementById('sp').style.display='none';document.getElementById('b').style.display='block';` +
+  `document.getElementById('t').textContent='桌面长时间未就绪';document.getElementById('s').textContent='实例可能在重启或未运行。可继续重试，或用左上角菜单返回主页让管理员检查。'}` +
+  `}catch(e){setTimeout(rl,3000)}})();</script></body></html>`;
+proxy.on('error', (_err, req, res) => {
   try {
     const r = res as any;
     if (r && typeof r.writeHead === 'function') {
-      r.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
-      r.end('桌面服务暂时不可用');
+      // 仅对浏览器导航（接受 text/html）回友好自动重连页；JS/CSS/XHR 等子资源回纯文本，避免把 HTML 喂给非页面请求。
+      const accept = String((req as any)?.headers?.accept || '');
+      if (accept.includes('text/html')) {
+        r.writeHead(502, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+        r.end(UPSTREAM_DOWN_HTML);
+      } else {
+        r.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+        r.end('桌面服务暂时不可用');
+      }
     } else if (r && typeof r.destroy === 'function') {
       r.destroy();
     }

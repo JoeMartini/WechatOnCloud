@@ -176,16 +176,10 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     // 「重新连接」按钮与「重启实例」后的重连同样走整页重载（见 restartInstance / 桌面无响应面板）。
     window.location.reload();
   };
-  // 声音（扬声器）开关，默认关。1.1.7 本就没有音频桥、连接很稳；音频是经一条额外 socket.io 连到实例 kclient，
-  // 为排除它对连接稳定性的影响、并回到 1.1.7 的连接行为，默认不连音频桥；想听声音再开（开关进 effect 依赖，
-  // 关→断开音频桥，开→建立）。
-  const [soundOn, setSoundOn] = useState(() => {
-    try {
-      return window.localStorage.getItem('woc_sound_on') === '1';
-    } catch {
-      return false;
-    }
-  });
+  // 声音（扬声器）开关：每次打开实例都默认【关】，不持久化 on 状态（用户要求）。音频桥是额外一条到 kclient
+  // 的 socket.io，蓝牙外放(AirPods)等场景交互较敏感，默认关最稳、最可预期；想听声音手动开即可（开→建立音频桥，
+  // 关→断开）。开了之后在桌面上点一下即可解挂起出声（见下方 resumePlayback 的 iframe 手势监听）。
+  const [soundOn, setSoundOn] = useState(false);
   const toggleSound = () => {
     const v = !soundOn;
     setSoundOn(v);
@@ -403,18 +397,50 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     const isFocused = () => !document.hidden && document.hasFocus();
     const sync = () => audio.setActive(isFocused());
     sync(); // 初始：若当前已聚焦则立即开声
+    // 关窗/关标签页时彻底断开音频桥（issue #82）：React effect 的清理在直接关闭窗口时不一定执行，
+    // 残留的 audio socket.io（开了麦克风时还占着 getUserMedia）会留在实例上，下次再进与新连接并存，
+    // 把实例顶到"需重启"。pagehide 在页面真正被丢弃（非进 bfcache）时同步断开，避免该残留。
+    const onPageHide = (e: PageTransitionEvent) => {
+      if (!e.persisted) audio.destroy();
+    };
     document.addEventListener('visibilitychange', sync);
     window.addEventListener('focus', sync);
     window.addEventListener('blur', sync);
+    window.addEventListener('pagehide', onPageHide);
     return () => {
       document.removeEventListener('visibilitychange', sync);
       window.removeEventListener('focus', sync);
       window.removeEventListener('blur', sync);
+      window.removeEventListener('pagehide', onPageHide);
       audio.destroy();
       audioRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showVnc, id, soundOn]);
+
+  // 让「点桌面画面」也能解挂起音频出声：浏览器自动播放策略会挂起 AudioContext，需用户手势恢复；但音频桥
+  // 的手势监听绑在父窗口上，而用户点的是同源 iframe 内的桌面，事件不冒泡到父窗口 → 故"点画面没用、得重开声音
+  // 开关"。这里在 iframe 内补一个手势监听，点桌面/按键即转调 resumePlayback() 恢复播放。
+  useEffect(() => {
+    if (!showVnc || !id || !soundOn || !frameLoaded) return;
+    const win = frameRef.current?.contentWindow;
+    if (!win) return;
+    const onGesture = () => audioRef.current?.resumePlayback();
+    try {
+      win.addEventListener('pointerdown', onGesture, true);
+      win.addEventListener('keydown', onGesture, true);
+    } catch {
+      return;
+    }
+    return () => {
+      try {
+        win.removeEventListener('pointerdown', onGesture, true);
+        win.removeEventListener('keydown', onGesture, true);
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [showVnc, id, soundOn, frameLoaded]);
 
   // 致命崩溃自愈：仅在 KasmVNC 真的弹出致命错误浮层时触发——整页重载是干净重连的唯一可靠路径
   // （旧 ws 已死，重载后干净重连；与 setMode/restartInstance 同理，不会引发新旧 ws 并存卡死 Xvnc）。
@@ -622,6 +648,10 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
     setImeSending(true);
     try {
       await api.typeInInstance(id, t);
+      // 打完直接补一个回车把消息发出去（issue #81），焦点【始终留在本输入条】。
+      // 切勿在转发模式把焦点切回虚拟机——那等于开了"无感输入"，用户接着打的拼音会以原始 keysym 直灌微信
+      // 输入框（出现 "nniih'h你好啊" 这种串码）。下一条仍在本条用本机输入法安全地打。
+      await api.keyInInstance(id, 'Return');
       setImeText('');
     } catch (e: any) {
       toast(e?.message || '发送失败：请确认实例已「升级实例」（镜像含 xclip/xdotool）', 'error');
@@ -853,7 +883,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
               <div className="spinner" />
               <div className="iv-loading-text">正在连接桌面…</div>
               <div className="iv-loading-sub">{profile.enterHint}</div>
-              <div className="iv-loading-sub">拖文件到此处即可上传；声音自动开启，点一下画面即可出声</div>
+              <div className="iv-loading-sub">拖文件到此处即可上传；需要声音点顶部「声音」开启，再在画面上点一下即出声</div>
               {!window.isSecureContext && (
                 <div className="iv-loading-warn">当前非 HTTPS 访问，浏览器将禁用麦克风与摄像头（音频播放不受影响）</div>
               )}
@@ -989,7 +1019,7 @@ export default function InstanceView({ onOpenMenu }: { onOpenMenu: () => void })
                     sendImeText();
                   }
                 }}
-                placeholder="中文输入这里 → 回车送进应用（先点好应用的输入框）。Shift+回车换行。"
+                placeholder="中文输入这里 → 回车直接发送到应用（先点好应用的输入框）。Shift+回车换行。"
                 rows={1}
               />
               <button
