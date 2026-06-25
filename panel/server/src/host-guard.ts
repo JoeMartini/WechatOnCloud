@@ -69,6 +69,31 @@ export function isAllowedHost(host: string, allowlist: string[]): boolean {
   if (!host) return false;
   if (isLoopbackHost(host)) return true;
   if (isPrivateIpv4(host)) return true;
-  if (allowlist.includes(host)) return true;
+  for (const entry of allowlist) {
+    if (entry === host) return true;
+    // 通配子域：*.example.com 匹配任意子域（a.example.com），但不匹配裸 example.com。
+    if (entry.startsWith('*.')) {
+      const suffix = entry.slice(1); // ".example.com"
+      if (host.length > suffix.length && host.endsWith(suffix)) return true;
+    }
+  }
+  return false;
+}
+
+// 反代/CDN（Cloudflare、nginx、Caddy 等）部署时，真实对外域名可能在 X-Forwarded-Host 里，
+// 而 Host 被改写成内部地址。综合判定：Host 或 X-Forwarded-Host 任一在白名单即放行。
+// 安全性：DNS-rebinding 攻击者直连面板时，浏览器 fetch 无法设置 X-Forwarded-Host（禁止首部），
+// 故该首部只会由可信反代设置，不会被攻击者利用。
+export function isRequestHostAllowed(
+  hostHeader: string | undefined,
+  forwardedHostHeader: string | string[] | undefined,
+  allowlist: string[],
+): boolean {
+  if (isAllowedHost(parseHost(hostHeader), allowlist)) return true;
+  let xfh = Array.isArray(forwardedHostHeader) ? forwardedHostHeader[0] : forwardedHostHeader;
+  if (xfh) {
+    xfh = xfh.split(',')[0]; // 多级代理链取第一个（最初的客户端 Host）
+    if (isAllowedHost(parseHost(xfh), allowlist)) return true;
+  }
   return false;
 }

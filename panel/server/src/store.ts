@@ -28,15 +28,33 @@ export interface User {
 // 初始默认管理员密码；管理员仍在用它时强烈提示改密。
 const DEFAULT_ADMIN_PASSWORD = 'wechat';
 
+// v1.2.0：实例可承载多种应用（不止微信）。同一镜像运行时按 appType 安装/启动对应应用。
+export type AppType = 'wechat' | 'telegram' | 'chromium' | 'custom';
+export const APP_TYPES: AppType[] = ['wechat', 'telegram', 'chromium', 'custom'];
+export const APP_LABELS: Record<AppType, string> = {
+  wechat: '微信',
+  telegram: 'Telegram',
+  chromium: '浏览器',
+  custom: '自定义应用',
+};
+// 向后兼容：v1.2.0 之前创建的实例没有 appType 字段，一律视为微信。
+export function instanceAppType(i: Instance): AppType {
+  return i.appType && APP_TYPES.includes(i.appType) ? i.appType : 'wechat';
+}
+
 export interface Instance {
   id: string; // 短 id，用于容器/卷命名
   name: string; // 显示名
+  appType?: AppType; // 承载的应用类型；缺省（老实例）= wechat（见 instanceAppType）
+  icon?: string; // 自定义图标：data: 图片(base64) 或 builtin:<key>；缺省按 appType 取默认图标
   containerName: string; // woc-wx-<id>
   volumeName: string; // woc-data-<id>
   kasmUser: string; // 随机生成，服务端注入反代，永不下发前端
   kasmPassword: string;
   createdAt: string;
   createdBy: string; // userId
+  // 自定义应用（appType=custom）：用户上传的安装包信息，autostart 据此启动。
+  customLaunch?: string; // 启动命令（容器内绝对路径或命令）
   // 自愈 watchdog 的"安全阀"，per-instance 覆盖全局默认；缺省时使用 env / 内置默认。
   // soft：内存超此值时，仅在"当前没有用户在远程会话"才主动重启（柔和自愈）；
   // hard：内存超此值时，无论是否有人在会话都重启（防止 OOM 拖垮宿主）。
@@ -44,9 +62,17 @@ export interface Instance {
   memHardLimitMB?: number;
 }
 
+// 面板级全局设置（持久化进 accounts.json）。
+export interface Settings {
+  // 实例桌面深色模式：由面板顶栏的主题开关统一控制（管理员）。true=实例内应用走深色。
+  // 既作为新建/重启实例的初始明暗（经容器环境 WOC_DARK 下发），也用于对运行中实例实时切换。
+  desktopDark?: boolean;
+}
+
 interface Data {
   users: User[];
   instances: Instance[];
+  settings?: Settings;
 }
 
 const FILE = process.env.PANEL_DATA || '/data/panel/accounts.json';
@@ -112,6 +138,20 @@ export function initStore() {
       console.log(`[store] 已重置用户 '${u.username}' 的密码（resetPassword 标记，密码=PANEL_ADMIN_PASSWORD 或默认 wechat）`);
     }
   }
+  persist();
+}
+
+// ---------- 全局设置 ----------
+export function getSettings(): Settings {
+  return data.settings || (data.settings = {});
+}
+
+export function getDesktopDark(): boolean {
+  return !!getSettings().desktopDark;
+}
+
+export function setDesktopDark(v: boolean) {
+  getSettings().desktopDark = !!v;
   persist();
 }
 
@@ -207,6 +247,8 @@ export function publicInstance(i: Instance) {
   return {
     id: i.id,
     name: i.name,
+    appType: instanceAppType(i), // 老实例无字段时回退 wechat
+    icon: i.icon,
     createdAt: i.createdAt,
     createdBy: i.createdBy,
     memSoftLimitMB: i.memSoftLimitMB,
@@ -272,7 +314,9 @@ export function createInstance(
   createdBy: string,
   allowedUserIds: string[] = [],
   reuseVolumeName?: string,
+  appType: AppType = 'wechat',
 ) {
+  const type: AppType = APP_TYPES.includes(appType) ? appType : 'wechat';
   let id = randomBytes(5).toString('hex'); // 10 hex chars
   let volumeName = `woc-data-${id}`;
   if (reuseVolumeName) {
@@ -284,7 +328,8 @@ export function createInstance(
   }
   const inst: Instance = {
     id,
-    name: name.trim() || `微信-${id.slice(0, 4)}`,
+    name: name.trim() || `${APP_LABELS[type]}-${id.slice(0, 4)}`,
+    appType: type,
     containerName: `woc-wx-${id}`,
     volumeName,
     kasmUser: 'woc',
@@ -312,6 +357,23 @@ export function renameInstance(id: string, name: string) {
   const n = (name || '').trim();
   if (!n || n.length > 30) throw new Error('实例名称为 1-30 个字符');
   inst.name = n;
+  persist();
+  return publicInstance(inst);
+}
+
+// 设置/清除实例自定义图标。传空 → 恢复按 appType 的默认图标。
+// 仅允许 builtin:<key> 或 data:image/...（裁剪后约 128px，限 ~225KB，防滥用撑大 accounts.json）。
+export function setInstanceIcon(id: string, icon: string | null) {
+  const inst = findInstance(id);
+  if (!inst) throw new Error('实例不存在');
+  const v = (icon ?? '').trim();
+  if (!v) {
+    delete inst.icon;
+  } else if (/^builtin:[a-z0-9_-]{1,32}$/.test(v) || (v.startsWith('data:image/') && v.length <= 300000)) {
+    inst.icon = v;
+  } else {
+    throw new Error('图标格式不合法或过大');
+  }
   persist();
   return publicInstance(inst);
 }

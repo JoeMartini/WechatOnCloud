@@ -1,0 +1,40 @@
+name: telegram-bot
+
+# Telegram 命令机器人（轮询版）——无需服务器，仅靠 GitHub Actions cron。
+# 私聊 / 群组都可用命令查询：/help /releases /release <tag> /issues /issue <编号>。
+#
+# 启用（一次性）：
+#   1) 已配置 telegram-notify 用到的 TELEGRAM_BOT_TOKEN（Secret）即可复用；
+#   2) 仓库 Settings → Secrets and variables → Actions → Variables 新建
+#        TELEGRAM_BOT_ENABLED = true     （未设为 true 则本工作流不运行，避免空跑）
+#   3) 把机器人拉进群组 / 在私聊里 /start。
+#
+# 局限：cron 最小 5 分钟且可能再延后 → 命令非实时；GitHub 会在仓库 60 天无活动时暂停定时任务。
+# 想立即处理一次：Actions → telegram-bot → Run workflow（workflow_dispatch）。
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: read
+
+# 避免轮询任务并发重叠重复处理；新触发取消正在跑的（残留未确认更新下次重处理，无副作用）
+concurrency:
+  group: telegram-bot
+  cancel-in-progress: true
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    if: ${{ vars.TELEGRAM_BOT_ENABLED == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Poll Telegram & handle commands
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: node .github/scripts/telegram-bot.mjs

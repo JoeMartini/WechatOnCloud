@@ -15,6 +15,8 @@ RUN set -eux; \
         curl ca-certificates locales dpkg \
         fonts-wqy-zenhei fonts-wqy-microhei fonts-noto-cjk fonts-noto-color-emoji \
         libnss3 libgbm1 libasound2 libxss1 \
+        xz-utils \
+        chromium \
         xdotool xclip; \
     sed -i 's/# zh_CN.UTF-8 UTF-8/zh_CN.UTF-8 UTF-8/' /etc/locale.gen; \
     locale-gen; \
@@ -62,19 +64,34 @@ ENV LANG=zh_CN.UTF-8 \
 #      用 e.data 直发成品字符串（详见 woc-www-patch.sh / woc-ime.pl）。
 # 注意：实际加载的是 webpack 产物 dist/main.bundle.js（app/ui.js 是未打包源码、运行时不加载），故必须改 bundle。
 COPY woc-www-patch.sh woc-ime.pl /woc/
-RUN chmod +x /woc/woc-www-patch.sh && /woc/woc-www-patch.sh
+RUN chmod 755 /woc/woc-www-patch.sh && chmod 644 /woc/woc-ime.pl && /woc/woc-www-patch.sh
 
 # 微信下载/解压控制脚本（运行时由面板经 docker exec 触发，状态写入数据卷 /config/.woc-state）
 COPY wechat-ctl.sh /woc/wechat-ctl.sh
-RUN chmod +x /woc/wechat-ctl.sh
+RUN chmod 755 /woc/wechat-ctl.sh
+
+# v1.2.0 多应用：应用定义（app-defs.sh，被 autostart/app-ctl 引用）+ 通用安装/状态控制（app-ctl.sh，
+# 微信委托回 wechat-ctl.sh、其它应用各自实现）。app-defs.sh 是被 source 的、不需可执行位。
+COPY app-defs.sh app-ctl.sh /woc/
+RUN chmod 644 /woc/app-defs.sh && chmod 755 /woc/app-ctl.sh
 
 # openbox 会话启动时执行此脚本：等待微信就绪 + 常驻拉起微信 + 最小化自动复原看守
 COPY autostart /defaults/autostart
-RUN chmod +x /defaults/autostart
+RUN chmod 755 /defaults/autostart
 
-# 启动钩子：每次启动用镜像内最新 autostart 覆盖数据卷旧副本（否则旧实例升级后用不上新逻辑）
+# 启动钩子（00）：给每个实例唯一且持久的 machine-id，避免所有实例共用镜像里烤死的同一个，
+# 触发腾讯"设备农场"风控导致登录即被强制退出。须在 autostart（拉起微信）之前执行，故用 00 前缀。
+COPY woc-identity.sh /custom-cont-init.d/00-woc-identity
+RUN chmod 755 /custom-cont-init.d/00-woc-identity
+
+# 启动钩子（01）：每次启动用镜像内最新 autostart 覆盖数据卷旧副本（否则旧实例升级后用不上新逻辑）
 COPY woc-update-autostart /custom-cont-init.d/01-woc-autostart
-RUN chmod +x /custom-cont-init.d/01-woc-autostart
+RUN chmod 755 /custom-cont-init.d/01-woc-autostart
+
+# 启动钩子（02）：把容器环境 WOC_APP_TYPE 写入 /config/.woc-app，供 autostart 选择启动哪个应用。
+# 须在 autostart 之前执行；缺 WOC_APP_TYPE 则不写 → autostart 回退微信（向后兼容）。
+COPY woc-app-init.sh /custom-cont-init.d/02-woc-app
+RUN chmod 755 /custom-cont-init.d/02-woc-app
 
 # 3000 = HTTP web 客户端, 3001 = HTTPS
 EXPOSE 3000 3001

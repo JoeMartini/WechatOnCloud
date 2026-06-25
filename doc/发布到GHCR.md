@@ -76,3 +76,38 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 
 > 若想保持私有，则使用者需先 `docker login ghcr.io`（用具备 `read:packages` 的 PAT）才能拉取。
 > 在镜像发布之前，本地用 [`./scripts/build-local.sh`](../scripts/build-local.sh) 自构建即可，无需等待发布。
+
+---
+
+## Telegram 发布通知（可选，免服务器）
+
+仓库内置 [.github/workflows/telegram-notify.yml](../.github/workflows/telegram-notify.yml) + [.github/scripts/tg-notify.mjs](../.github/scripts/tg-notify.mjs)：**新版本发布** / **新 issue** 时，把内容（GitHub Markdown 渲染为 Telegram HTML）推送到群组。跑在 GitHub Actions 上，无需服务器；未配置则自动跳过。**发布通知还会自动置顶，并取消上一个 release 的置顶**（群里始终只置顶最新版本）。
+
+一次性配置：
+
+1. 把机器人（如 `@WechatOnCloudBot`）拉进目标 Telegram 群组。**要让"自动置顶"生效，需把机器人设为群管理员并开启「置顶消息」权限**（缺权限时通知照发、仅置顶被跳过，不影响主流程）。
+2. 取群组 chat id：bot 进群后在群里发条消息，浏览器打开 `https://api.telegram.org/bot<BOT_TOKEN>/getUpdates`，找 `result[].message.chat.id`（群组通常是 `-100` 开头的负数）。
+3. 仓库 **Settings → Secrets and variables → Actions**：
+   - **Variables** 标签 → `TELEGRAM_CHAT_ID` = 上面的 chat id；
+   - **Secrets** 标签 → `TELEGRAM_BOT_TOKEN` = [@BotFather](https://t.me/BotFather) 给的 token。
+
+之后每次「发布 Release / 新建 issue」都会自动推送。想关掉 issue 推送，删掉 workflow 里 `on:` 下的 `issues:` 即可。
+
+> **自动置顶原理**：发完新消息后，用 `getChat` 读出群当前置顶消息（即上一个 release），置顶新消息、再取消旧的——无需任何持久化存储。issue 通知不置顶。手动 **Run workflow** 也会置顶（发的是最新 release），可用来测试。
+
+---
+
+## Telegram 命令机器人（可选，免服务器，轮询版）
+
+除了发布通知，仓库还内置 [.github/workflows/telegram-bot.yml](../.github/workflows/telegram-bot.yml) + [.github/scripts/telegram-bot.mjs](../.github/scripts/telegram-bot.mjs)：让机器人在**私聊 / 群组**里响应命令，跑在 GitHub Actions cron 上，**不需要服务器**。
+
+命令：`/help`、`/releases`、`/release <tag>`、`/issues`、`/issue <编号>`。
+
+启用：
+
+1. 复用上面的 `TELEGRAM_BOT_TOKEN`（Secret）；
+2. 仓库 **Settings → Secrets and variables → Actions → Variables** 新建 `TELEGRAM_BOT_ENABLED = true`（不设为 `true` 则该工作流不运行）；
+3. 把机器人拉进群组，或在私聊里 `/start`。
+
+> **原理**：每 5 分钟（cron 最小间隔）调用 `getUpdates` 拉取待处理命令、回复、再用 `offset` 向 Telegram 确认（Telegram 自己保存 offset，**无需任何持久化存储**）。
+> **局限**：命令**非实时**——受 cron 最小 5 分钟 + GitHub 排队延迟影响；且 GitHub 会在仓库 60 天无活动时暂停定时任务（去 Actions 页手动重启即可）。想立即处理一次：Actions → telegram-bot → **Run workflow**。要真正实时，得改用 webhook（需一个 serverless 端点）。

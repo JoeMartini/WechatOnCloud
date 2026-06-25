@@ -1,17 +1,252 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api, type PanelUser, type InstanceWithStatus } from '../api';
+import Cropper from 'react-easy-crop';
+import { api, APP_LABELS, appProfile, type PanelUser, type InstanceWithStatus, type VolEntry, type AppType, type VersionInfo } from '../api';
+import { InstanceIcon, ICON_CHOICES } from '../AppIcon';
 import { useUI, PasswordInput } from '../ui';
 import { useAuth } from '../auth';
 import { useAuthConfig } from '../hooks/useAuthConfig';
 
 const BUSY_PHASES = ['downloading', 'extracting', 'installing'];
 
+function fmtBytes(n: number): string {
+  if (!n) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+  return `${(n / Math.pow(1024, i)).toFixed(i ? 1 : 0)} ${u[i]}`;
+}
+function fmtDate(ms: number): string {
+  const d = new Date(ms);
+  const p = (x: number) => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 const MenuIcon = (
   <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
     <path d="M4 6h16M4 12h16M4 18h16" />
   </svg>
 );
+
+// 折叠菜单的展开箭头
+const CaretIcon = (
+  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M6 9l6 6 6-6" />
+  </svg>
+);
+
+// 数据卷文件浏览器用的小图标（线性 SVG，统一描边风格，替代渲染不一致的 emoji）
+const svgIcon = (children: JSX.Element, size = 16) => (
+  <svg viewBox="0 0 24 24" width={size} height={size} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    {children}
+  </svg>
+);
+const FolderIcon = svgIcon(<path d="M3 7a2 2 0 0 1 2-2h3.5l2 2H19a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />, 18);
+const FileIcon = svgIcon(
+  <>
+    <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+    <path d="M14 3v5h5" />
+  </>,
+  18,
+);
+const DownloadIcon = svgIcon(
+  <>
+    <path d="M12 3v12" />
+    <path d="M7 11l5 5 5-5" />
+    <path d="M5 21h14" />
+  </>,
+);
+const EditIcon = svgIcon(
+  <>
+    <path d="M12 20h9" />
+    <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z" />
+  </>,
+);
+const TrashIcon = svgIcon(
+  <>
+    <path d="M3 6h18" />
+    <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+    <path d="M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14" />
+  </>,
+);
+
+// 友好空状态：圆形图标 + 标题 + 说明 + 可选引导按钮（沿用首页 .empty-state 样式）
+function EmptyState({ icon, title, sub, action }: { icon: string; title: string; sub?: string; action?: JSX.Element }) {
+  return (
+    <div className="empty-state">
+      <div className="empty-blob">{icon}</div>
+      <div className="empty-title">{title}</div>
+      {sub && <div className="empty-sub">{sub}</div>}
+      {action && <div className="empty-action">{action}</div>}
+    </div>
+  );
+}
+
+const RELEASES_URL = 'https://github.com/Gloridust/WechatOnCloud/releases';
+
+const DIAG_RANGE_OPTIONS = [
+  { key: '24h', label: '24 小时' },
+  { key: '7d', label: '7 天' },
+  { key: '30d', label: '30 天' },
+  { key: '1y', label: '1 年' },
+];
+
+// 「诊断与日志」（仅管理员）：单实例「日志」只记录该实例日志；这里一键打包全局——系统信息 +
+// 面板运维日志 + 全部实例容器状态/日志 + 容器清单，便于排查部署/创建卡死/黑屏不可用等问题。
+function DiagnosticsSection() {
+  const [range, setRange] = useState('24h');
+  const exportBundle = () => {
+    // tar.gz 带 content-disposition: attachment，用隐藏 <a> 触发下载（带同源 cookie），不离开页面。
+    const a = document.createElement('a');
+    a.href = api.diagnosticsUrl(range);
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+  return (
+    <>
+      <div className="section-row" style={{ marginTop: 22 }}>
+        <span className="section-title">诊断与日志</span>
+      </div>
+      <div className="settings-block">
+        <p className="s-desc">打包系统/Docker 信息 + 面板全局日志 + 各实例容器状态与日志 + 容器清单，用于排查部署、创建卡死、黑屏不可用、升级失败等问题。</p>
+        <div className="s-field">
+          <span className="field-label">时间范围</span>
+          <div className="chip-row">
+            {DIAG_RANGE_OPTIONS.map((r) => (
+              <button key={r.key} className={'chip chip-toggle' + (range === r.key ? ' on' : '')} onClick={() => setRange(r.key)}>
+                {r.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="settings-actions">
+          <button className="btn btn-primary s-btn" onClick={exportBundle}>
+            导出诊断包
+          </button>
+          <a className="btn-text" href={api.panelLogUrl(range)} target="_blank" rel="noreferrer">
+            查看面板日志 ›
+          </a>
+        </div>
+        <p className="s-foot">导出当前选定范围内的日志（.tar.gz）。超过一年的日志自动清理；诊断包不含密码 / 密钥等敏感信息。</p>
+      </div>
+    </>
+  );
+}
+
+// 「关于」：显示真实构建版本号 + 检测新版（后台已每 6h 查 Docker Hub/GHCR；这里读缓存并可手动重查）。
+function AboutSection({ isAdmin }: { isAdmin: boolean }) {
+  const { toast, confirm } = useUI();
+  const [info, setInfo] = useState<VersionInfo | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [updating, setUpdating] = useState(false);
+
+  useEffect(() => {
+    api.getVersion().then(setInfo).catch(() => {});
+  }, []);
+
+  // 一键更新面板：拉新镜像 + 派生 helper 容器重建 woc-panel（数据保留，带失败回滚）。
+  // 触发后面板会被重建、本连接短暂中断，约 20s 后自动刷新到新版本。
+  const selfUpdate = async () => {
+    const ok = await confirm({
+      title: '一键更新面板？',
+      body: `将拉取最新镜像并重建面板容器（数据/登录保留），约十几秒、期间面板会短暂重启，完成后自动刷新。${info?.latest ? `\n目标版本：${info.latest}` : ''}`,
+      confirmText: '更新',
+    });
+    if (!ok) return;
+    setUpdating(true);
+    try {
+      const r = await api.selfUpdatePanel();
+      toast(r.message || '已开始更新，面板将重启，请稍候…', 'ok');
+      window.setTimeout(() => window.location.reload(), 25000); // 等新面板起来后自动刷新
+    } catch (e: any) {
+      toast(e.message || '更新失败', 'error');
+      setUpdating(false);
+    }
+  };
+
+  // 当前版本是否为正式发布版（语义化 vX.Y.Z）。dev / dev-<sha> 等本地构建无法与发布版比较，
+  // 既不显示「已是最新」也不显示红点，只把最新发布版作为信息展示。
+  const isRelease = !!info && /^v?\d+\.\d+\.\d+$/.test(info.current);
+
+  const check = async () => {
+    setChecking(true);
+    try {
+      const r = await api.checkUpdate();
+      setInfo(r);
+      const rel = /^v?\d+\.\d+\.\d+$/.test(r.current);
+      if (r.error) toast('检查失败：' + r.error, 'error');
+      else if (r.hasUpdate) toast(`发现新版本 ${r.latest}`, 'ok');
+      else if (!rel) toast(`最新发布 ${r.latest ?? '未知'}（当前为开发版）`, 'ok');
+      else toast('已是最新版本', 'ok');
+    } catch (e: any) {
+      toast(e.message || '检查失败', 'error');
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="section-row" style={{ marginTop: 22 }}>
+        <span className="section-title">关于</span>
+      </div>
+      <div className="settings-block">
+        <div className="s-title-row">
+          <span className="s-app">云微 · WechatOnCloud</span>
+          {info?.hasUpdate ? <span className="tag tag-warn">有新版</span> : info && !isRelease ? <span className="tag">开发版</span> : null}
+        </div>
+        <p className="s-line">
+          当前版本 <b>{info?.current ?? '…'}</b>
+          {info?.hasUpdate && info.latest && (
+            <>
+              {' · '}最新 <b>{info.latest}</b>
+            </>
+          )}
+          {isRelease && info && !info.hasUpdate && info.latest && !info.error && <>{' · '}已是最新</>}
+          {!isRelease && info?.latest && !info.error && (
+            <>
+              {' · '}最新发布 <b>{info.latest}</b>
+            </>
+          )}
+        </p>
+        {info?.hasUpdate && (
+          <div className="ver-hint">
+            {isAdmin
+              ? '点「一键更新面板」即可自动拉新镜像并重建面板（数据/登录保留，约十几秒、期间会短暂重启，完成后自动刷新）。各实例镜像可在「管理 → 升级」单独更新。'
+              : '面板有新版本，请联系管理员更新。'}
+          </div>
+        )}
+        <div className="settings-actions">
+          {info?.hasUpdate && isAdmin && (
+            <button className="btn btn-primary s-btn" disabled={updating} onClick={selfUpdate}>
+              {updating ? '更新中…请稍候' : '一键更新面板'}
+            </button>
+          )}
+          {info?.hasUpdate && (
+            <a className="btn-text" href={RELEASES_URL + '/latest'} target="_blank" rel="noreferrer">
+              查看新版 ›
+            </a>
+          )}
+          {isAdmin && (
+            <button className="btn-text" disabled={checking || updating} onClick={check}>
+              {checking ? '检查中…' : '检查更新'}
+            </button>
+          )}
+          <a className="btn-text" href={RELEASES_URL} target="_blank" rel="noreferrer">
+            发布日志 ›
+          </a>
+        </div>
+        {info && (
+          <p className="s-foot">
+            {info.checkedAt ? `上次检查 ${fmtDate(info.checkedAt)}` : '尚未检查'}
+            {info.source && ` · 来源 ${info.source}`}
+            {info.error && ` · ${info.error}`}
+          </p>
+        )}
+      </div>
+    </>
+  );
+}
 
 export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: () => void; onChangePassword: () => void }) {
   const nav = useNavigate();
@@ -31,6 +266,8 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
   const [deleteInst, setDeleteInst] = useState<InstanceWithStatus | null>(null); // 删除实例弹窗
   const [renameInst, setRenameInst] = useState<InstanceWithStatus | null>(null); // 重命名实例弹窗
   const [securityInst, setSecurityInst] = useState<InstanceWithStatus | null>(null); // 安全（内存阈值）弹窗
+  const [volumeInst, setVolumeInst] = useState<InstanceWithStatus | null>(null); // 数据卷管理弹窗
+  const [iconInst, setIconInst] = useState<InstanceWithStatus | null>(null); // 图标编辑弹窗
   const [acting, setActing] = useState<Record<string, string>>({}); // 实例 id → 进行中的动作文案（启动中/升级中…）
   // 未使用的旧数据卷（来自之前删实例时未勾选"彻底清除"）：允许复用以继承聊天记录，或显式删除。
   const [orphanVols, setOrphanVols] = useState<{ name: string; createdAt?: string; sizeBytes?: number }[]>([]);
@@ -207,15 +444,22 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
         {isAdmin && (
           <>
             <div className="section-row">
-              <span className="section-title">微信实例</span>
+              <span className="section-title">实例</span>
               <button className="btn-text" onClick={() => setCreatingInst(true)}>
                 + 新建实例
               </button>
             </div>
             {instances.length === 0 ? (
-              <div className="list">
-                <div className="muted small" style={{ padding: '14px 16px' }}>暂无实例</div>
-              </div>
+              <EmptyState
+                icon="🖥️"
+                title="还没有实例"
+                sub="新建一个实例（微信 / Chromium 浏览器），进入后即可在浏览器里使用"
+                action={
+                  <button className="btn btn-primary" onClick={() => setCreatingInst(true)}>
+                    ＋ 新建实例
+                  </button>
+                }
+              />
             ) : (
               <div className="inst-grid">
                 {instances.map((inst) => (
@@ -234,6 +478,8 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
                     onAssign={() => setAssignInst(inst)}
                     onDelete={() => setDeleteInst(inst)}
                     onSecurity={() => setSecurityInst(inst)}
+                    onVolume={() => setVolumeInst(inst)}
+                    onIcon={() => setIconInst(inst)}
                   />
                 ))}
               </div>
@@ -248,9 +494,16 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
               )}
             </div>
             {subs.length === 0 ? (
-              <div className="list">
-                <div className="muted small" style={{ padding: '14px 16px' }}>暂无子账号</div>
-              </div>
+              <EmptyState
+                icon="👥"
+                title="还没有子账号"
+                sub="子账号是登录这套面板的身份，可按账号分配能访问哪些实例"
+                action={
+                  <button className="btn btn-primary" onClick={() => setCreatingUser(true)}>
+                    ＋ 新建子账号
+                  </button>
+                }
+              />
             ) : (
               <div className="inst-grid">
                 {subs.map((u) => (
@@ -369,6 +622,9 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
             </div>
           </div>
         </div>
+
+        {isAdmin && <DiagnosticsSection />}
+        <AboutSection isAdmin={isAdmin} />
       </main>
 
       {creatingUser && (
@@ -451,6 +707,19 @@ export default function Admin({ onOpenMenu, onChangePassword }: { onOpenMenu: ()
           onClose={() => setSecurityInst(null)}
           onDone={() => {
             toast('已保存安全阈值', 'ok');
+            load();
+          }}
+        />
+      )}
+      {volumeInst && (
+        <VolumeManager inst={volumeInst} onClose={() => setVolumeInst(null)} onChanged={load} />
+      )}
+      {iconInst && (
+        <InstanceIconEditor
+          inst={iconInst}
+          onClose={() => setIconInst(null)}
+          onDone={() => {
+            toast('已更新图标', 'ok');
             load();
           }}
         />
@@ -543,6 +812,7 @@ function ResetPassword({ user, onClose, onDone }: { user: PanelUser; onClose: ()
 // hard：超过即强制重启（无视会话，防止 OOM）
 // 留空 = 使用面板全局默认（来自 env）。
 function InstanceSecurity({ inst, onClose, onDone }: { inst: InstanceWithStatus; onClose: () => void; onDone: () => void }) {
+  const { toast, confirm } = useUI();
   const [data, setData] = useState<import('../api').MemLimits | null>(null);
   // 输入字段：空串 = "使用默认"（→ 提交时映射为 null）
   const [softStr, setSoftStr] = useState('');
@@ -550,6 +820,28 @@ function InstanceSecurity({ inst, onClose, onDone }: { inst: InstanceWithStatus;
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [regenBusy, setRegenBusy] = useState(false);
+
+  const regenMachineId = async () => {
+    const ok = await confirm({
+      title: '重置该实例的设备 ID？',
+      body: '会生成一个全新的设备标识（machine-id）并重启实例，相当于"换一台新设备"。微信需要重新扫码登录。适用于该账号被微信判定设备风险、登录即被强制退出的情况。',
+      danger: true,
+      confirmText: '重置并重启',
+    });
+    if (!ok) return;
+    setRegenBusy(true);
+    try {
+      await api.regenMachineId(inst.id);
+      toast('已重置设备 ID，实例正在重启，请稍后重新扫码登录', 'ok');
+      onClose();
+      onDone();
+    } catch (e: any) {
+      toast(e.message || '重置失败', 'error');
+    } finally {
+      setRegenBusy(false);
+    }
+  };
 
   // 首次加载 + 每 5s 刷新 currentMB（运行实例的实时内存）
   useEffect(() => {
@@ -673,6 +965,22 @@ function InstanceSecurity({ inst, onClose, onDone }: { inst: InstanceWithStatus;
             <div className="muted small" style={{ marginTop: 6 }}>
               提示：日常活跃内存约 1500 MiB；soft 建议略高于此（如 2000），hard 建议远低于宿主可用内存（如 3000~4000）。
             </div>
+
+            <div className="field-label" style={{ marginTop: 16 }}>设备身份（machine-id）</div>
+            <div className="muted small" style={{ lineHeight: 1.6 }}>
+              微信会用设备标识做风控。若该账号被判定<b>设备风险</b>、登录后被强制退出且反复循环，
+              可重置为一个全新的唯一设备 ID（相当于换台新设备），再重新扫码登录。会重启该实例。
+            </div>
+            <button
+              type="button"
+              className="btn"
+              style={{ marginTop: 8, alignSelf: 'flex-start' }}
+              onClick={regenMachineId}
+              disabled={regenBusy || busy}
+            >
+              {regenBusy ? '重置中…' : '↻ 重置设备 ID 并重启'}
+            </button>
+
             {err && <div className="error">{err}</div>}
           </>
         )}
@@ -750,6 +1058,8 @@ function InstanceAdminCard({
   onAssign,
   onDelete,
   onSecurity,
+  onVolume,
+  onIcon,
 }: {
   inst: InstanceWithStatus;
   userCount: number;
@@ -764,12 +1074,27 @@ function InstanceAdminCard({
   onAssign: () => void;
   onDelete: () => void;
   onSecurity: () => void;
+  onVolume: () => void;
+  onIcon: () => void;
 }) {
   const wx = inst.wechat;
   const busy = BUSY_PHASES.includes(wx.phase);
   const installed = wx.installed && wx.phase !== 'downloading';
   const offline = inst.runtime !== 'running';
   const working = !!acting || busy; // 生命周期操作中 或 微信下载/更新中 → 锁住卡片
+  const [menuOpen, setMenuOpen] = useState(false); // 「管理」菜单是否展开（悬浮层，不占文档流）
+  const menuRef = useRef<HTMLDivElement>(null);
+  // 悬浮下拉：点击菜单外部时关闭
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onDocDown = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDocDown);
+    return () => document.removeEventListener('mousedown', onDocDown);
+  }, [menuOpen]);
+
+  const profile = appProfile(inst.appType);
 
   let badge: { text: string; cls: string };
   if (acting) badge = { text: '处理中', cls: 'tag-busy' };
@@ -783,11 +1108,11 @@ function InstanceAdminCard({
   else if (busy) sub = wx.percent >= 0 ? `${wx.message || '处理中'} ${wx.percent}%` : wx.message || '请稍候…';
   else if (wx.phase === 'error') sub = wx.message || '操作失败，可重试';
   else if (offline) sub = inst.runtime === 'missing' ? '容器尚未创建' : '容器已停止';
-  else if (installed) sub = wx.version ? `微信 ${wx.version}` : '微信已安装';
-  else sub = '微信尚未安装';
+  else if (installed) sub = wx.version ? `${profile.label} ${wx.version}` : `${profile.label}已就绪`;
+  else sub = `${profile.label}尚未安装`;
 
   return (
-    <div className="inst-card">
+    <div className={'inst-card' + (menuOpen ? ' open-menu' : '')}>
       <div className="inst-head">
         <span className="inst-name">{inst.name}</span>
         <span className={'tag ' + badge.cls}>{badge.text}</span>
@@ -815,49 +1140,471 @@ function InstanceAdminCard({
                 {inst.runtime === 'missing' ? '创建并启动' : '启动实例'}
               </button>
             ) : (
-              <button className="btn btn-primary inst-act-wide" disabled={!installed} onClick={onEnter} title={installed ? '' : '需先下载安装微信'}>
+              <button className="btn btn-primary inst-act-wide" disabled={!installed} onClick={onEnter} title={installed ? '' : '需先下载安装' + profile.label}>
                 进入实例
               </button>
             )}
           </div>
 
-          <div className="inst-admin-links">
-            {!offline && (
-              <button className="btn-text" onClick={() => onTrigger(inst, installed ? 'update' : 'install')}>
-                {installed ? '更新微信' : '下载安装'}
-              </button>
+          <div className="inst-menu-wrap" ref={menuRef}>
+            <button className={'inst-menu-toggle' + (menuOpen ? ' open' : '')} onClick={() => setMenuOpen((v) => !v)}>
+              <span>管理</span>
+              <span className="inst-menu-caret">{CaretIcon}</span>
+            </button>
+
+            {menuOpen && (
+              <div className="inst-menu" onClick={() => setMenuOpen(false)}>
+              <div className="inst-menu-group">
+                <div className="inst-menu-label">运维</div>
+                <div className="inst-menu-items">
+                  {!offline && profile.needsInstall && (
+                    <button className="btn-text" onClick={() => onTrigger(inst, installed ? 'update' : 'install')}>
+                      {installed ? profile.updateLabel : '下载安装'}
+                    </button>
+                  )}
+                  <button className="btn-text" onClick={onUpgrade} title="拉取最新镜像并重建（保留聊天记录）">
+                    升级实例
+                  </button>
+                  {!offline && (
+                    <button className="btn-text" onClick={onRestart}>
+                      重启
+                    </button>
+                  )}
+                  {!offline && (
+                    <button className="btn-text" onClick={onStop}>
+                      停止
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="inst-menu-group">
+                <div className="inst-menu-label">设置</div>
+                <div className="inst-menu-items">
+                  <button className="btn-text" onClick={onRename}>
+                    重命名
+                  </button>
+                  <button className="btn-text" onClick={onAssign}>
+                    分配账户
+                  </button>
+                  <button className="btn-text" onClick={() => window.open(api.instanceLogsUrl(inst.id), '_blank')} title="查看实例日志（含历史：重启原因 + 上一容器日志快照，跨重启保留）">
+                    日志
+                  </button>
+                  <button className="btn-text" onClick={onSecurity} title="内存阈值自愈">
+                    安全
+                  </button>
+                  <button className="btn-text" onClick={onIcon} title="设置实例图标：内置图标 / 上传图片裁剪">
+                    图标
+                  </button>
+                  <button className="btn-text" onClick={onVolume} title="数据卷：备份/恢复、上传 PC 微信数据、文件管理">
+                    数据卷
+                  </button>
+                </div>
+              </div>
+              <div className="inst-menu-group inst-menu-danger">
+                <div className="inst-menu-items">
+                  <button className="btn-text danger" onClick={onDelete}>
+                    删除实例
+                  </button>
+                </div>
+              </div>
+            </div>
             )}
-            <button className="btn-text" onClick={onUpgrade} title="拉取最新镜像并重建（保留聊天记录），把实例更新到新版">
-              升级实例
-            </button>
-            {!offline && (
-              <button className="btn-text" onClick={onRestart}>
-                重启
-              </button>
-            )}
-            {!offline && (
-              <button className="btn-text" onClick={onStop}>
-                停止
-              </button>
-            )}
-            <button className="btn-text" onClick={onRename}>
-              重命名
-            </button>
-            <button className="btn-text" onClick={onAssign}>
-              分配账户
-            </button>
-            <button className="btn-text" onClick={() => window.open(api.instanceLogsUrl(inst.id), '_blank')} title="查看实例容器日志（排错）">
-              日志
-            </button>
-            <button className="btn-text" onClick={onSecurity} title="设置内存阈值：超过 soft 且无人会话时柔和重启；超过 hard 强制重启">
-              安全
-            </button>
-            <button className="btn-text danger" onClick={onDelete}>
-              删除
-            </button>
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+// 把裁剪区域画到 128px 画布并导出 PNG dataURL（存进 inst.icon）
+async function cropToDataUrl(src: string, area: { x: number; y: number; width: number; height: number }): Promise<string> {
+  const img = await new Promise<HTMLImageElement>((res, rej) => {
+    const i = new Image();
+    i.onload = () => res(i);
+    i.onerror = rej;
+    i.src = src;
+  });
+  const SIZE = 128;
+  const c = document.createElement('canvas');
+  c.width = SIZE;
+  c.height = SIZE;
+  c.getContext('2d')!.drawImage(img, area.x, area.y, area.width, area.height, 0, 0, SIZE, SIZE);
+  return c.toDataURL('image/png');
+}
+
+// 实例图标编辑：选内置图标 / 上传图片裁剪 / 恢复默认。
+function InstanceIconEditor({ inst, onClose, onDone }: { inst: InstanceWithStatus; onClose: () => void; onDone: () => void }) {
+  const { toast } = useUI();
+  const [sel, setSel] = useState<string>(inst.icon || ''); // '' = 按应用默认
+  const [busy, setBusy] = useState(false);
+  const [cropSrc, setCropSrc] = useState(''); // 非空 = 裁剪态
+  const [crop, setCrop] = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(1);
+  const [area, setArea] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const onPickFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    e.target.value = '';
+    if (!f) return;
+    if (!f.type.startsWith('image/')) return toast('请选择图片文件', 'error');
+    if (f.size > 8 * 1024 * 1024) return toast('图片过大（>8MB）', 'error');
+    const r = new FileReader();
+    r.onload = () => {
+      setCropSrc(String(r.result));
+      setCrop({ x: 0, y: 0 });
+      setZoom(1);
+    };
+    r.readAsDataURL(f);
+  };
+
+  const confirmCrop = async () => {
+    if (!cropSrc || !area) return;
+    try {
+      setSel(await cropToDataUrl(cropSrc, area));
+      setCropSrc('');
+    } catch {
+      toast('裁剪失败', 'error');
+    }
+  };
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      await api.setInstanceIcon(inst.id, sel || null);
+      onDone();
+      onClose();
+    } catch (e: any) {
+      toast(e?.message || '保存失败', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="modal-mask" onClick={onClose}>
+      <div className="card modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 460 }}>
+        <h2>图标 · {inst.name}</h2>
+        {cropSrc ? (
+          <>
+            <div className="icon-crop">
+              <Cropper
+                image={cropSrc}
+                crop={crop}
+                zoom={zoom}
+                aspect={1}
+                showGrid={false}
+                onCropChange={setCrop}
+                onZoomChange={setZoom}
+                onCropComplete={(_, a) => setArea(a)}
+              />
+            </div>
+            <input type="range" min={1} max={3} step={0.01} value={zoom} onChange={(e) => setZoom(Number(e.target.value))} />
+            <div className="modal-actions">
+              <button type="button" className="btn" onClick={() => setCropSrc('')}>返回</button>
+              <button type="button" className="btn btn-primary" onClick={confirmCrop}>裁剪并使用</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="icon-edit-top">
+              <InstanceIcon icon={sel || undefined} appType={inst.appType} size={56} radius={14} />
+              <div className="muted small">预览（{sel.startsWith('data:') ? '自定义图片' : sel.startsWith('builtin:') ? '内置图标' : '按应用默认'}）</div>
+            </div>
+            <div className="field-label">内置图标</div>
+            <div className="icon-grid">
+              <button type="button" className={'icon-pick' + (sel === '' ? ' sel' : '')} onClick={() => setSel('')}>
+                <InstanceIcon appType={inst.appType} size={38} radius={11} />
+                <span>默认</span>
+              </button>
+              {ICON_CHOICES.map((c) => (
+                <button
+                  type="button"
+                  key={c.key}
+                  className={'icon-pick' + (sel === `builtin:${c.key}` ? ' sel' : '')}
+                  onClick={() => setSel(`builtin:${c.key}`)}
+                >
+                  <InstanceIcon icon={`builtin:${c.key}`} size={38} radius={11} />
+                  <span>{c.label}</span>
+                </button>
+              ))}
+            </div>
+            <button type="button" className="btn" onClick={() => fileRef.current?.click()}>上传图片并裁剪…</button>
+            <input ref={fileRef} type="file" accept="image/*" hidden onChange={onPickFile} />
+            <div className="modal-actions">
+              <button type="button" className="btn" onClick={onClose} disabled={busy}>取消</button>
+              <button type="button" className="btn btn-primary" onClick={save} disabled={busy}>保存</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// 数据卷管理（仅管理员）：整卷备份/恢复 + 文件浏览器（浏览/上传/解压/下载/改名/移动/删除）。
+// 主要场景：把 PC 微信数据迁移上来、跨实例迁移、离线备份。全程在「运行中」的实例上操作
+// （浏览/改名/删除靠 docker exec，需容器运行）。整卷恢复会覆盖全部数据，强提示并建议恢复后重启实例。
+function VolumeManager({ inst, onClose, onChanged }: { inst: InstanceWithStatus; onClose: () => void; onChanged: () => void }) {
+  const { toast, confirm } = useUI();
+  const [path, setPath] = useState('');
+  const [entries, setEntries] = useState<VolEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(''); // 进行中操作文案；非空即禁用界面
+  const [mkdirOpen, setMkdirOpen] = useState(false);
+  const [mkdirName, setMkdirName] = useState('');
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameVal, setRenameVal] = useState('');
+  const uploadRef = useRef<HTMLInputElement>(null);
+  const extractRef = useRef<HTMLInputElement>(null);
+  const restoreRef = useRef<HTMLInputElement>(null);
+  const offline = inst.runtime !== 'running'; // 文件浏览需实例运行中
+
+  const join = (a: string, b: string) => (a ? a + '/' + b : b);
+
+  const load = async (p = path) => {
+    setLoading(true);
+    setErr('');
+    try {
+      const r = await api.volumeList(inst.id, p);
+      setEntries(r.entries);
+      setPath(r.path);
+    } catch (e: any) {
+      setErr(e?.message || '读取失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => {
+    if (offline) {
+      setLoading(false);
+      return;
+    }
+    load('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inst.id]);
+
+  const sorted = [...entries].sort((a, b) => {
+    if ((a.type === 'dir') !== (b.type === 'dir')) return a.type === 'dir' ? -1 : 1;
+    return a.name.localeCompare(b.name, 'zh');
+  });
+  const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+  const segs = path ? path.split('/') : [];
+
+  const run = async (label: string, fn: () => Promise<any>, okMsg?: string, skipReload = false) => {
+    setBusy(label);
+    try {
+      await fn();
+      if (okMsg) toast(okMsg, 'ok');
+      if (!skipReload) await load();
+    } catch (e: any) {
+      toast(e?.message || '操作失败', 'error');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const doMkdir = async () => {
+    const name = mkdirName.trim();
+    if (!name) return;
+    await run('新建中…', () => api.volumeMkdir(inst.id, join(path, name)), '已新建文件夹');
+    setMkdirName('');
+    setMkdirOpen(false);
+  };
+
+  const doRename = async (oldName: string) => {
+    const nv = renameVal.trim();
+    setRenaming(null);
+    if (!nv || nv === oldName) return;
+    // 含 / → 视为相对 /config 的目标路径（移动到子目录）；否则同目录改名
+    const to = nv.includes('/') ? nv.replace(/^\/+/, '') : join(path, nv);
+    await run('处理中…', () => api.volumeMove(inst.id, join(path, oldName), to), '已重命名 / 移动');
+  };
+
+  const doDelete = async (en: VolEntry) => {
+    const ok = await confirm({
+      title: `删除「${en.name}」？`,
+      body: en.type === 'dir' ? '将递归删除该文件夹下所有内容，不可恢复。' : '删除后不可恢复。',
+      danger: true,
+      confirmText: '删除',
+    });
+    if (!ok) return;
+    await run('删除中…', () => api.volumeDelete(inst.id, join(path, en.name)), '已删除');
+  };
+
+  const onPick = (kind: 'upload' | 'extract' | 'restore') => async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    if (kind === 'restore') {
+      const ok = await confirm({
+        title: '恢复整卷备份？',
+        body: `将用「${file.name}」覆盖该实例 /config 的全部数据（含登录态、聊天库），不可撤销。建议仅用于本系统导出的备份；恢复后请在卡片上「重启」实例以加载数据。`,
+        danger: true,
+        confirmText: '覆盖恢复',
+      });
+      if (!ok) return;
+      await run(`恢复 ${file.name}…`, () => api.volumeRestore(inst.id, file), '恢复完成，请重启实例以加载数据', true);
+      onChanged();
+      return;
+    }
+    if (kind === 'upload') await run(`上传 ${file.name}…`, () => api.volumeUpload(inst.id, path, file), '上传完成');
+    else await run(`解压 ${file.name}…`, () => api.volumeExtract(inst.id, path, file), '解压完成');
+  };
+
+  const disabled = !!busy;
+  const icon = (en: VolEntry) => (en.type === 'dir' ? FolderIcon : FileIcon);
+
+  return (
+    <div className="modal-mask" onClick={onClose}>
+      <div className="card modal vol-modal" onClick={(e) => e.stopPropagation()}>
+        <h2>数据卷 · {inst.name}</h2>
+
+        {/* 整卷备份 / 恢复（运行/停止均可用） */}
+        <div className="vol-sec">
+          <div className="vol-section-label">整卷备份 / 恢复</div>
+          <div className="vol-topbar">
+            <a className="btn" href={api.volumeBackupUrl(inst.id)} target="_blank" rel="noreferrer">下载整卷备份</a>
+            <button className="btn" disabled={disabled} onClick={() => restoreRef.current?.click()}>恢复备份…</button>
+            <input ref={restoreRef} type="file" accept=".gz,.tgz,.tar" hidden onChange={onPick('restore')} />
+          </div>
+          <div className="vol-hint">整卷含聊天记录，用于跨实例迁移 / 离线备份。</div>
+        </div>
+
+        {offline ? (
+          <div className="vol-warn">
+            实例未运行，文件浏览不可用。可执行上方的整卷备份 / 恢复；要浏览或上传单个文件，请先在卡片上启动实例。
+          </div>
+        ) : (
+          <div className="vol-sec">
+            <div className="vol-section-label">文件浏览</div>
+            {/* 面包屑 */}
+            <div className="vol-crumbs">
+              <button className="vol-crumb" disabled={disabled} onClick={() => load('')}>/config</button>
+              {segs.map((s, i) => (
+                <span key={i}>
+                  <span className="vol-sep">/</span>
+                  <button className="vol-crumb" disabled={disabled} onClick={() => load(segs.slice(0, i + 1).join('/'))}>
+                    {s}
+                  </button>
+                </span>
+              ))}
+            </div>
+
+            {/* 工具条 */}
+            <div className="vol-tools">
+              <button className="btn-text" disabled={disabled} onClick={() => uploadRef.current?.click()}>上传文件</button>
+              <button className="btn-text" disabled={disabled} onClick={() => extractRef.current?.click()}>上传并解压</button>
+              <button className="btn-text" disabled={disabled} onClick={() => setMkdirOpen((v) => !v)}>新建文件夹</button>
+              <button className="btn-text" disabled={disabled} onClick={() => load()}>刷新</button>
+              <input ref={uploadRef} type="file" hidden onChange={onPick('upload')} />
+              <input ref={extractRef} type="file" accept=".gz,.tgz,.tar" hidden onChange={onPick('extract')} />
+            </div>
+            {mkdirOpen && (
+              <div className="vol-mkdir">
+                <input
+                  className="input"
+                  placeholder="文件夹名"
+                  value={mkdirName}
+                  autoFocus
+                  onChange={(e) => setMkdirName(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && doMkdir()}
+                />
+                <button className="btn btn-primary" disabled={disabled || !mkdirName.trim()} onClick={doMkdir}>创建</button>
+              </div>
+            )}
+
+            {busy && <div className="vol-busy">{busy}</div>}
+
+            {/* 文件列表 */}
+            <div className="vol-list">
+              {loading ? (
+                <div className="muted small" style={{ padding: 16 }}>读取中…</div>
+              ) : err ? (
+                <div className="error">{err}</div>
+              ) : sorted.length === 0 ? (
+                <div className="muted small" style={{ padding: 16 }}>{path ? '空目录' : '（无内容）'}</div>
+              ) : (
+                <>
+                  {path && (
+                    <button className="vol-row vol-main vol-up" disabled={disabled} onClick={() => load(parent)}>
+                      <span className="vol-ic">{FolderIcon}</span>
+                      <span className="vol-nm">返回上一级</span>
+                    </button>
+                  )}
+                  {sorted.map((en) => (
+                    <div className="vol-row" key={en.name}>
+                      {renaming === en.name ? (
+                        <input
+                          className="input vol-rename"
+                          autoFocus
+                          value={renameVal}
+                          onChange={(e) => setRenameVal(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') doRename(en.name);
+                            if (e.key === 'Escape') setRenaming(null);
+                          }}
+                          onBlur={() => doRename(en.name)}
+                        />
+                      ) : (
+                        <button
+                          className="vol-main"
+                          disabled={disabled}
+                          onClick={() => (en.type === 'dir' ? load(join(path, en.name)) : undefined)}
+                          style={{ cursor: en.type === 'dir' ? 'pointer' : 'default' }}
+                        >
+                          <span className={'vol-ic' + (en.type === 'dir' ? ' dir' : '')}>{icon(en)}</span>
+                          <span className="vol-nm">{en.name}</span>
+                          <span className="vol-meta">
+                            {en.type === 'dir' ? '' : fmtBytes(en.size)}
+                            {en.mtime ? ` · ${fmtDate(en.mtime)}` : ''}
+                          </span>
+                        </button>
+                      )}
+                      <div className="vol-acts">
+                        {en.type === 'file' && (
+                          <a
+                            className="vol-act"
+                            title="下载"
+                            href={api.volumeDownloadUrl(inst.id, join(path, en.name))}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            {DownloadIcon}
+                          </a>
+                        )}
+                        <button
+                          className="vol-act"
+                          title="重命名 / 移动"
+                          disabled={disabled}
+                          onClick={() => {
+                            setRenameVal(en.name);
+                            setRenaming(en.name);
+                          }}
+                        >
+                          {EditIcon}
+                        </button>
+                        <button className="vol-act danger" title="删除" disabled={disabled} onClick={() => doDelete(en)}>
+                          {TrashIcon}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div className="muted small" style={{ marginTop: 10, lineHeight: 1.6 }}>
+          PC 微信数据迁移：把数据文件夹打包成 <b>.tar.gz</b>，用「上传并解压」放到对应目录；改动微信正在使用的数据后，重启实例方可生效。能否解密取决于微信版本与设备绑定，请自行测试。
+        </div>
+
+        <div className="modal-actions">
+          <button className="btn btn-primary" onClick={onClose}>关闭</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -946,8 +1693,16 @@ function CreateUser({ instances, onClose, onDone }: { instances: InstanceWithSta
   );
 }
 
+// 可创建的应用类型。ready=false 的暂时禁用（即将支持）。Telegram（仅 x86_64）与其它应用暂缓。
+const APP_OPTIONS: { type: AppType; desc: string; ready: boolean }[] = [
+  { type: 'wechat', desc: '默认', ready: true },
+  { type: 'chromium', desc: '浏览器', ready: true },
+  { type: 'custom', desc: '即将支持', ready: false },
+];
+
 function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose: () => void; onDone: () => void }) {
   const [name, setName] = useState('');
+  const [appType, setAppType] = useState<AppType>('wechat');
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
@@ -973,7 +1728,7 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
     setErr('');
     setBusy(true);
     try {
-      await api.createInstance(name.trim(), [...sel], reuse || undefined);
+      await api.createInstance(name.trim(), [...sel], reuse || undefined, appType);
       onDone();
     } catch (e: any) {
       setErr(e.message || '创建失败');
@@ -985,8 +1740,27 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
   return (
     <div className="modal-mask" onClick={onClose}>
       <form className="card modal" onClick={(e) => e.stopPropagation()} onSubmit={submit}>
-        <h2>新建微信实例</h2>
-        <input className="input" placeholder="实例名称（如：我的微信 / 公司号）" value={name} onChange={(e) => setName(e.target.value)} />
+        <h2>新建实例</h2>
+        <div className="field-label">应用类型</div>
+        <div className="app-picker">
+          {APP_OPTIONS.map((o) => (
+            <button
+              key={o.type}
+              type="button"
+              className={'app-pick' + (appType === o.type ? ' sel' : '')}
+              disabled={!o.ready}
+              title={o.ready ? '' : '即将支持'}
+              onClick={() => o.ready && setAppType(o.type)}
+            >
+              <span className="app-pick-name">{APP_LABELS[o.type]}</span>
+              <span className="app-pick-desc">{o.desc}</span>
+            </button>
+          ))}
+        </div>
+        <input className="input" placeholder="实例名称（留空自动命名）" value={name} onChange={(e) => setName(e.target.value)} />
+        {appType === 'chromium' && (
+          <div className="muted small">Chromium 浏览器随镜像就绪，创建后直接「进入实例」即可（无需下载安装）。</div>
+        )}
         <div className="field-label">允许访问的子账号（管理员默认可访问全部）</div>
         <ChipMultiSelect
           options={subs.map((u) => ({ id: u.id, label: u.username }))}
@@ -1012,7 +1786,9 @@ function CreateInstance({ subs, onClose, onDone }: { subs: PanelUser[]; onClose:
           </>
         )}
         {err && <div className="error">{err}</div>}
-        <div className="muted small" style={{ marginTop: 4 }}>创建后会拉起一个新的微信容器，进入后扫码登录。</div>
+        <div className="muted small" style={{ marginTop: 4 }}>
+          创建后拉起一个新的 {APP_LABELS[appType]} 容器；进入实例后点「下载并安装」，再登录即可。
+        </div>
         <div className="modal-actions">
           <button type="button" className="btn" onClick={onClose}>
             取消

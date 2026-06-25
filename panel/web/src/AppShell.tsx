@@ -3,7 +3,9 @@ import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-
 import { useAuth } from './auth';
 import { useAuthConfig } from './hooks/useAuthConfig';
 import { useUI, PasswordInput } from './ui';
-import { api, type InstanceWithStatus } from './api';
+import { api, appProfile, type InstanceWithStatus } from './api';
+import { InstanceIcon } from './AppIcon';
+import { getThemeMode, applyThemeMode, nextThemeMode, resolveDark, type ThemeMode } from './theme';
 import InstanceView from './pages/Desktop';
 import Admin from './pages/Admin';
 
@@ -159,6 +161,17 @@ function Sidebar({ collapsed, onToggleCollapsed, allowLocalMgmt }: { collapsed: 
   const isAdmin = user?.role === 'admin';
   const go = (p: string) => nav(p);
 
+  // 有新版时在「管理」入口点个红点（仅管理员，因为升级面板需管理员在宿主操作）。
+  // 依赖 loc.pathname：导航时复查一次（服务端有缓存、开销极小），保证刚启动时首检完成后红点能及时出现。
+  const [hasUpdate, setHasUpdate] = useState(false);
+  useEffect(() => {
+    if (!isAdmin) return;
+    api
+      .getVersion()
+      .then((v) => setHasUpdate(!!v.hasUpdate))
+      .catch(() => {});
+  }, [isAdmin, loc.pathname]);
+
   return (
     <aside className="sidebar">
       <div className="sb-top">
@@ -178,7 +191,7 @@ function Sidebar({ collapsed, onToggleCollapsed, allowLocalMgmt }: { collapsed: 
         </button>
       </nav>
 
-      {!collapsed && <div className="sb-section">微信实例</div>}
+      {!collapsed && <div className="sb-section">实例</div>}
       <div className="sb-list">
         {instances.length === 0 && !collapsed && <div className="sb-empty">暂无可用实例</div>}
         {instances.map((inst) => {
@@ -187,7 +200,7 @@ function Sidebar({ collapsed, onToggleCollapsed, allowLocalMgmt }: { collapsed: 
           return (
             <button key={inst.id} className={'sb-item sb-inst' + (on ? ' on' : '')} onClick={() => go(`/i/${inst.id}`)} title={inst.name}>
               <span className="sb-avatar">
-                {inst.name.slice(0, 1)}
+                <InstanceIcon icon={inst.icon} appType={inst.appType} size={34} radius={10} />
                 <span className={'sb-dot ' + st.cls} />
               </span>
               {!collapsed && <span className="sb-label">{inst.name}</span>}
@@ -198,9 +211,17 @@ function Sidebar({ collapsed, onToggleCollapsed, allowLocalMgmt }: { collapsed: 
       </div>
 
       <div className="sb-footer">
-        <button className={'sb-item' + (loc.pathname === '/admin' ? ' on' : '')} onClick={() => go('/admin')} title={isAdmin ? '管理' : '设置'}>
-          <span className="sb-ic">{Icon.gear}</span>
+        <button
+          className={'sb-item' + (loc.pathname === '/admin' ? ' on' : '')}
+          onClick={() => go('/admin')}
+          title={isAdmin && hasUpdate ? '管理 · 有新版本可用' : isAdmin ? '管理' : '设置'}
+        >
+          <span className="sb-ic">
+            {Icon.gear}
+            {isAdmin && hasUpdate && <span className="sb-updot" />}
+          </span>
           {!collapsed && <span className="sb-label">{isAdmin ? '管理' : '设置'}</span>}
+          {!collapsed && isAdmin && hasUpdate && <span className="sb-updot-text">新版</span>}
         </button>
         <button
           className="sb-item"
@@ -223,6 +244,89 @@ function Sidebar({ collapsed, onToggleCollapsed, allowLocalMgmt }: { collapsed: 
   );
 }
 
+// 主题切换图标（跟随系统 / 亮色 / 深色 循环）。
+const themeIcon: Record<ThemeMode, JSX.Element> = {
+  auto: (
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor" stroke="none" />
+    </svg>
+  ),
+  light: (
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+      <circle cx="12" cy="12" r="4" />
+      <path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.4 1.4M17.6 17.6L19 19M19 5l-1.4 1.4M6.4 17.6L5 19" />
+    </svg>
+  ),
+  dark: (
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+      <path d="M20 14.5A8 8 0 0 1 9.5 4a7 7 0 1 0 10.5 10.5z" />
+    </svg>
+  ),
+};
+// 主题开关：统一控制「面板」+「实例桌面」深色。面板部分立即生效（本地 CSS）；实例部分仅管理员可改
+// （服务端持久化 + 对运行中实例 docker exec 实时切换；非管理员只切自己的面板观感，不动实例）。
+function ThemeToggle() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
+  const [mode, setMode] = useState<ThemeMode>(() => getThemeMode());
+
+  // 让实例桌面跟随面板主题。dark = 该模式解析后的实际明暗（auto 按系统）。best-effort，失败忽略。
+  const pushDesktop = (dark: boolean) => {
+    if (!isAdmin) return;
+    api.setDesktopTheme(dark).catch(() => {});
+  };
+
+  // 登录/进入主页时对齐一次：仅当实例当前明暗与面板主题不一致才下发，避免无谓的 exec。
+  useEffect(() => {
+    if (!isAdmin) return;
+    let alive = true;
+    (async () => {
+      try {
+        const want = resolveDark(getThemeMode());
+        const { dark } = await api.getDesktopTheme();
+        if (alive && dark !== want) await api.setDesktopTheme(want);
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [isAdmin]);
+
+  // 跟随系统时，系统亮暗变化也要带动实例。
+  useEffect(() => {
+    if (!isAdmin || mode !== 'auto') return;
+    let mq: MediaQueryList;
+    try {
+      mq = window.matchMedia('(prefers-color-scheme: dark)');
+    } catch {
+      return;
+    }
+    const on = () => pushDesktop(mq.matches);
+    mq.addEventListener?.('change', on);
+    return () => mq.removeEventListener?.('change', on);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isAdmin, mode]);
+
+  const cycle = () => {
+    const m = nextThemeMode(mode);
+    applyThemeMode(m);
+    setMode(m);
+    pushDesktop(resolveDark(m));
+  };
+  const label = mode === 'auto' ? '跟随系统' : mode === 'light' ? '亮色' : '深色';
+  const hint = isAdmin
+    ? `主题：${label}（面板即时换肤；浏览器实例重启后跟随。点击循环：跟随系统 / 亮色 / 深色）`
+    : `主题：${label}（点击切换：跟随系统 / 亮色 / 深色）`;
+  return (
+    <button className="theme-toggle" onClick={cycle} title={hint} aria-label={`主题：${label}`}>
+      {themeIcon[mode]}
+    </button>
+  );
+}
+
 function HomeView({ onOpenMenu, onChangePassword, allowLocalMgmt }: { onOpenMenu: () => void; onChangePassword: () => void; allowLocalMgmt: boolean }) {
   const { user } = useAuth();
   const { instances, loaded } = useInstances();
@@ -236,6 +340,7 @@ function HomeView({ onOpenMenu, onChangePassword, allowLocalMgmt }: { onOpenMenu
           {Icon.menu}
         </button>
         <span className="ws-title">主页</span>
+        <ThemeToggle />
       </header>
 
       <div className="content">
@@ -255,7 +360,7 @@ function HomeView({ onOpenMenu, onChangePassword, allowLocalMgmt }: { onOpenMenu
         )}
 
         <div className="section-row">
-          <span className="section-title">我的微信实例</span>
+          <span className="section-title">我的实例</span>
           {isAdmin && (
             <button className="btn-text" onClick={() => nav('/admin')}>
               管理 ›
@@ -268,19 +373,30 @@ function HomeView({ onOpenMenu, onChangePassword, allowLocalMgmt }: { onOpenMenu
             <div className="empty-blob">
               <img src="/favicon.svg" alt="" />
             </div>
-            <div className="empty-title">还没有微信实例</div>
-            <div className="empty-sub">{isAdmin ? '去「管理」新建一个微信实例' : '请联系管理员为你分配实例'}</div>
+            <div className="empty-title">还没有实例</div>
+            <div className="empty-sub">{isAdmin ? '去「管理」新建一个实例' : '请联系管理员为你分配实例'}</div>
           </div>
         ) : (
           <div className="inst-grid">
             {instances.map((inst) => {
               const st = statusOf(inst);
+              const prof = appProfile(inst.appType);
+              const meta = inst.wechat.installed
+                ? `${prof.label} ${inst.wechat.version || ''}`.trim()
+                : inst.runtime === 'running' && prof.needsInstall
+                  ? `待下载安装${prof.label}`
+                  : '';
               return (
                 <button key={inst.id} className="home-card" onClick={() => nav(`/i/${inst.id}`)}>
-                  <span className="home-card-av">{inst.name.slice(0, 1)}</span>
+                  <span className="home-card-av">
+                    <InstanceIcon icon={inst.icon} appType={inst.appType} size={42} radius={12} />
+                  </span>
                   <span className="home-card-main">
                     <span className="home-card-name">{inst.name}</span>
-                    <span className={'home-card-st ' + st.cls}>● {st.text}</span>
+                    <span className="home-card-meta">
+                      <span className={'home-card-st ' + st.cls}>● {st.text}</span>
+                      {meta && <span className="home-card-ver">{meta}</span>}
+                    </span>
                   </span>
                   <span className="enter-arrow">›</span>
                 </button>
