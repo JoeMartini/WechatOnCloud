@@ -3,7 +3,6 @@ name: Build and Push Docker Image
 on:
   push:
     branches:
-      - main
       - feature/oidc-auth
 
 permissions:
@@ -47,7 +46,7 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ./docker
           file: ./docker/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
